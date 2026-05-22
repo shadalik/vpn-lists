@@ -108,7 +108,7 @@ jobs:
           INPUT_COUNT="${{ github.event.inputs.count }}"
           INPUT_FILENAME="${{ github.event.inputs.filename }}"
           INPUT_RANDOM="${{ github.event.inputs.random }}"
-          # По умолчанию (schedule) — рандом
+          # По умолчанию (schedule) — без рандома
           [ -z "$INPUT_RANDOM" ] && INPUT_RANDOM="false"
 
           if [ -n "$INPUT_URL" ]; then
