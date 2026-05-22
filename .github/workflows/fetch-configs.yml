@@ -109,7 +109,7 @@ jobs:
           INPUT_FILENAME="${{ github.event.inputs.filename }}"
           INPUT_RANDOM="${{ github.event.inputs.random }}"
           # По умолчанию (schedule) — рандом
-          [ -z "$INPUT_RANDOM" ] && INPUT_RANDOM="true"
+          [ -z "$INPUT_RANDOM" ] && INPUT_RANDOM="false"
 
           if [ -n "$INPUT_URL" ]; then
             # Ручной запуск с URL
