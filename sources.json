@@ -1,0 +1,9 @@
+{
+  "lists": [
+    {
+      "url": "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
+      "filename": "white-cidr-ru.txt",
+      "count": 20
+    }
+  ]
+}

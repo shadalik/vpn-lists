@@ -1,0 +1,91 @@
+name: Fetch VPN Configs
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL источника (оставьте пустым для обновления всех из sources.json)"
+        required: false
+        type: string
+      count:
+        description: "Количество конфигов (0 = все из sources.json)"
+        required: false
+        default: "0"
+        type: string
+      filename:
+        description: "Имя выходного файла (обязательно если указан url)"
+        required: false
+        type: string
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch single list
+        if: ${{ github.event.inputs.url != '' && github.event.inputs.url != null }}
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          COUNT="${{ github.event.inputs.count }}"
+          FILENAME="${{ github.event.inputs.filename }}"
+
+          if [ -z "$FILENAME" ]; then
+            echo "Error: filename is required when url is specified"
+            exit 1
+          fi
+
+          if [ "$COUNT" = "0" ] || [ -z "$COUNT" ]; then
+            COUNT=20
+          fi
+
+          echo "Fetching $COUNT configs from $URL -> $FILENAME"
+          curl -sL "$URL" | grep '^vless://' | head -n "$COUNT" > "configs/$FILENAME"
+
+          LINES=$(wc -l < "configs/$FILENAME")
+          echo "Saved $LINES configs to configs/$FILENAME"
+
+      - name: Fetch all lists from sources.json
+        if: ${{ github.event.inputs.url == '' || github.event.inputs.url == null }}
+        run: |
+          if [ ! -f sources.json ]; then
+            echo "No sources.json found, skipping"
+            exit 0
+          fi
+
+          COUNT=$(jq '.lists | length' sources.json)
+          echo "Found $COUNT lists in sources.json"
+
+          for i in $(seq 0 $((COUNT - 1))); do
+            URL=$(jq -r ".lists[$i].url" sources.json)
+            FILENAME=$(jq -r ".lists[$i].filename" sources.json)
+            ITEMS=$(jq -r ".lists[$i].count" sources.json)
+
+            if [ "$ITEMS" = "null" ] || [ -z "$ITEMS" ]; then
+              ITEMS=20
+            fi
+
+            echo "Fetching $ITEMS configs from $URL -> $FILENAME"
+            curl -sL "$URL" | grep '^vless://' | head -n "$ITEMS" > "configs/$FILENAME"
+
+            LINES=$(wc -l < "configs/$FILENAME")
+            echo "  Saved $LINES configs"
+          done
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add configs/
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update configs $(date -u '+%Y-%m-%d %H:%M')"
+            git push
+          fi
