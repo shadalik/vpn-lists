@@ -16,6 +16,14 @@ on:
         description: "Имя выходного файла (обязательно если указан url)"
         required: false
         type: string
+      random:
+        description: "Перемешивать конфиги перед выборкой (true/false)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
   schedule:
     - cron: "*/30 * * * *"
 
@@ -46,6 +54,7 @@ jobs:
             local URL="$1"
             local TARGET="$2"
             local FILENAME="$3"
+            local RANDOMIZE="$4"
             local OUTFILE="configs/$FILENAME"
 
             echo "=== $FILENAME: target=$TARGET configs ==="
@@ -55,7 +64,13 @@ jobs:
             local TMPRAW=$(mktemp)
 
             echo "  Fetching $FETCH configs from source..."
-            curl -sL "$URL" | grep '^vless://' | head -n "$FETCH" > "$TMPRAW"
+            if [ "$RANDOMIZE" = "true" ]; then
+              echo "  Mode: random"
+              curl -sL "$URL" | grep '^vless://' | shuf | head -n "$FETCH" > "$TMPRAW"
+            else
+              echo "  Mode: sequential"
+              curl -sL "$URL" | grep '^vless://' | head -n "$FETCH" > "$TMPRAW"
+            fi
             local TOTAL=$(wc -l < "$TMPRAW")
             echo "  Got $TOTAL configs from source"
 
@@ -92,6 +107,9 @@ jobs:
           INPUT_URL="${{ github.event.inputs.url }}"
           INPUT_COUNT="${{ github.event.inputs.count }}"
           INPUT_FILENAME="${{ github.event.inputs.filename }}"
+          INPUT_RANDOM="${{ github.event.inputs.random }}"
+          # По умолчанию (schedule) — рандом
+          [ -z "$INPUT_RANDOM" ] && INPUT_RANDOM="true"
 
           if [ -n "$INPUT_URL" ]; then
             # Ручной запуск с URL
@@ -101,7 +119,7 @@ jobs:
             fi
             COUNT="$INPUT_COUNT"
             [ "$COUNT" = "0" ] || [ -z "$COUNT" ] && COUNT=20
-            fetch_and_filter "$INPUT_URL" "$COUNT" "$INPUT_FILENAME"
+            fetch_and_filter "$INPUT_URL" "$COUNT" "$INPUT_FILENAME" "$INPUT_RANDOM"
           else
             # Все списки из sources.json
             if [ ! -f sources.json ]; then
@@ -124,7 +142,7 @@ jobs:
 
               [ "$ITEMS" = "null" ] || [ -z "$ITEMS" ] && ITEMS=20
 
-              fetch_and_filter "$URL" "$ITEMS" "$FILENAME"
+              fetch_and_filter "$URL" "$ITEMS" "$FILENAME" "$INPUT_RANDOM"
             done
           fi
 
