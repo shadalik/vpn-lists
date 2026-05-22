@@ -8,7 +8,7 @@ on:
         required: false
         type: string
       count:
-        description: "Количество конфигов (0 = все из sources.json)"
+        description: "Сколько конфигов взять из URL (0 = 20 по умолчанию)"
         required: false
         default: "0"
         type: string
