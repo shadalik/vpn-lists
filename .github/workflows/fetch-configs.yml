@@ -58,13 +58,20 @@ jobs:
             exit 0
           fi
 
-          COUNT=$(jq '.lists | length' sources.json)
-          echo "Found $COUNT lists in sources.json"
+          INPUT_COUNT="${{ github.event.inputs.count }}"
 
-          for i in $(seq 0 $((COUNT - 1))); do
+          LIST_COUNT=$(jq '.lists | length' sources.json)
+          echo "Found $LIST_COUNT lists in sources.json"
+
+          for i in $(seq 0 $((LIST_COUNT - 1))); do
             URL=$(jq -r ".lists[$i].url" sources.json)
             FILENAME=$(jq -r ".lists[$i].filename" sources.json)
             ITEMS=$(jq -r ".lists[$i].count" sources.json)
+
+            # Входной count перекрывает значение из sources.json
+            if [ "$INPUT_COUNT" != "0" ] && [ -n "$INPUT_COUNT" ]; then
+              ITEMS="$INPUT_COUNT"
+            fi
 
             if [ "$ITEMS" = "null" ] || [ -z "$ITEMS" ]; then
               ITEMS=20
