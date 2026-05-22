@@ -84,6 +84,43 @@ jobs:
             echo "  Saved $LINES configs"
           done
 
+      - name: Check configs liveness
+        run: |
+          echo "Checking TCP connectivity for all configs..."
+          for FILE in configs/*.txt; do
+            [ -f "$FILE" ] || continue
+            ALIVE=0
+            TOTAL=0
+            TMPFILE=$(mktemp)
+
+            while IFS= read -r LINE; do
+              [ -z "$LINE" ] && continue
+              TOTAL=$((TOTAL + 1))
+
+              # Извлекаем host:port из vless://uuid@host:port?params
+              HOSTPORT=$(echo "$LINE" | sed -n 's|.*@\([^?]*\).*|\1|p')
+              HOST=$(echo "$HOSTPORT" | cut -d: -f1)
+              PORT=$(echo "$HOSTPORT" | cut -d: -f2)
+
+              if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+                echo "  SKIP (parse error): $HOSTPORT"
+                continue
+              fi
+
+              # TCP check с таймаутом 3 сек
+              if timeout 3 bash -c "echo >/dev/tcp/$HOST/$PORT" 2>/dev/null; then
+                echo "  ALIVE: $HOST:$PORT"
+                echo "$LINE" >> "$TMPFILE"
+                ALIVE=$((ALIVE + 1))
+              else
+                echo "  DEAD:  $HOST:$PORT"
+              fi
+            done < "$FILE"
+
+            mv "$TMPFILE" "$FILE"
+            echo "$FILE: $ALIVE/$TOTAL alive"
+          done
+
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
