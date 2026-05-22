@@ -93,6 +93,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Update configs $(date -u '+%Y-%m-%d %H:%M')"
+            git commit -m "Update configs $(TZ=Europe/Moscow date '+%Y-%m-%d %H:%M')"
             git push
           fi
