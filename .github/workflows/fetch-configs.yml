@@ -8,7 +8,7 @@ on:
         required: false
         type: string
       count:
-        description: "Сколько конфигов взять из URL (0 = 20 по умолчанию)"
+        description: "Сколько конфигов взять из URL (0 = по умолчанию из sources.json)"
         required: false
         default: "0"
         type: string
@@ -28,98 +28,105 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Fetch single list
-        if: ${{ github.event.inputs.url != '' && github.event.inputs.url != null }}
+      - name: Fetch and check configs
         run: |
-          URL="${{ github.event.inputs.url }}"
-          COUNT="${{ github.event.inputs.count }}"
-          FILENAME="${{ github.event.inputs.filename }}"
+          check_alive() {
+            local HOSTPORT="$1"
+            local HOST=$(echo "$HOSTPORT" | cut -d: -f1)
+            local PORT=$(echo "$HOSTPORT" | cut -d: -f2)
+            [ -z "$HOST" ] || [ -z "$PORT" ] && return 1
+            timeout 3 bash -c "echo >/dev/tcp/$HOST/$PORT" 2>/dev/null
+          }
 
-          if [ -z "$FILENAME" ]; then
-            echo "Error: filename is required when url is specified"
-            exit 1
-          fi
+          extract_hostport() {
+            echo "$1" | sed -n 's|.*@\([^?]*\).*|\1|p'
+          }
 
-          if [ "$COUNT" = "0" ] || [ -z "$COUNT" ]; then
-            COUNT=20
-          fi
+          fetch_and_filter() {
+            local URL="$1"
+            local TARGET="$2"
+            local FILENAME="$3"
+            local OUTFILE="configs/$FILENAME"
 
-          echo "Fetching $COUNT configs from $URL -> $FILENAME"
-          curl -sL "$URL" | grep '^vless://' | head -n "$COUNT" > "configs/$FILENAME"
+            echo "=== $FILENAME: target=$TARGET configs ==="
 
-          LINES=$(wc -l < "configs/$FILENAME")
-          echo "Saved $LINES configs to configs/$FILENAME"
+            # Берём с запасом (x3), чтобы было из чего докачать
+            local FETCH=$((TARGET * 3))
+            local TMPRAW=$(mktemp)
 
-      - name: Fetch all lists from sources.json
-        if: ${{ github.event.inputs.url == '' || github.event.inputs.url == null }}
-        run: |
-          if [ ! -f sources.json ]; then
-            echo "No sources.json found, skipping"
-            exit 0
-          fi
+            echo "  Fetching $FETCH configs from source..."
+            curl -sL "$URL" | grep '^vless://' | head -n "$FETCH" > "$TMPRAW"
+            local TOTAL=$(wc -l < "$TMPRAW")
+            echo "  Got $TOTAL configs from source"
 
-          INPUT_COUNT="${{ github.event.inputs.count }}"
-
-          LIST_COUNT=$(jq '.lists | length' sources.json)
-          echo "Found $LIST_COUNT lists in sources.json"
-
-          for i in $(seq 0 $((LIST_COUNT - 1))); do
-            URL=$(jq -r ".lists[$i].url" sources.json)
-            FILENAME=$(jq -r ".lists[$i].filename" sources.json)
-            ITEMS=$(jq -r ".lists[$i].count" sources.json)
-
-            # Входной count перекрывает значение из sources.json
-            if [ "$INPUT_COUNT" != "0" ] && [ -n "$INPUT_COUNT" ]; then
-              ITEMS="$INPUT_COUNT"
-            fi
-
-            if [ "$ITEMS" = "null" ] || [ -z "$ITEMS" ]; then
-              ITEMS=20
-            fi
-
-            echo "Fetching $ITEMS configs from $URL -> $FILENAME"
-            curl -sL "$URL" | grep '^vless://' | head -n "$ITEMS" > "configs/$FILENAME"
-
-            LINES=$(wc -l < "configs/$FILENAME")
-            echo "  Saved $LINES configs"
-          done
-
-      - name: Check configs liveness
-        run: |
-          echo "Checking TCP connectivity for all configs..."
-          for FILE in configs/*.txt; do
-            [ -f "$FILE" ] || continue
-            ALIVE=0
-            TOTAL=0
-            TMPFILE=$(mktemp)
+            local ALIVEFILE=$(mktemp)
+            local ALIVE=0
+            local CHECKED=0
 
             while IFS= read -r LINE; do
               [ -z "$LINE" ] && continue
-              TOTAL=$((TOTAL + 1))
+              CHECKED=$((CHECKED + 1))
+              local HP=$(extract_hostport "$LINE")
 
-              # Извлекаем host:port из vless://uuid@host:port?params
-              HOSTPORT=$(echo "$LINE" | sed -n 's|.*@\([^?]*\).*|\1|p')
-              HOST=$(echo "$HOSTPORT" | cut -d: -f1)
-              PORT=$(echo "$HOSTPORT" | cut -d: -f2)
-
-              if [ -z "$HOST" ] || [ -z "$PORT" ]; then
-                echo "  SKIP (parse error): $HOSTPORT"
-                continue
-              fi
-
-              # TCP check с таймаутом 3 сек
-              if timeout 3 bash -c "echo >/dev/tcp/$HOST/$PORT" 2>/dev/null; then
-                echo "  ALIVE: $HOST:$PORT"
-                echo "$LINE" >> "$TMPFILE"
+              if check_alive "$HP"; then
+                echo "  ALIVE: $HP"
+                echo "$LINE" >> "$ALIVEFILE"
                 ALIVE=$((ALIVE + 1))
               else
-                echo "  DEAD:  $HOST:$PORT"
+                echo "  DEAD:  $HP"
               fi
-            done < "$FILE"
 
-            mv "$TMPFILE" "$FILE"
-            echo "$FILE: $ALIVE/$TOTAL alive"
-          done
+              # Достаточно живых — стоп
+              [ "$ALIVE" -ge "$TARGET" ] && break
+            done < "$TMPRAW"
+
+            # Берём ровно TARGET живых
+            head -n "$TARGET" "$ALIVEFILE" > "$OUTFILE"
+            local FINAL=$(wc -l < "$OUTFILE")
+
+            rm -f "$TMPRAW" "$ALIVEFILE"
+            echo "  Result: $FINAL/$TARGET alive configs saved"
+          }
+
+          # Определяем что запускать
+          INPUT_URL="${{ github.event.inputs.url }}"
+          INPUT_COUNT="${{ github.event.inputs.count }}"
+          INPUT_FILENAME="${{ github.event.inputs.filename }}"
+
+          if [ -n "$INPUT_URL" ]; then
+            # Ручной запуск с URL
+            if [ -z "$INPUT_FILENAME" ]; then
+              echo "Error: filename required when url specified"
+              exit 1
+            fi
+            COUNT="$INPUT_COUNT"
+            [ "$COUNT" = "0" ] || [ -z "$COUNT" ] && COUNT=20
+            fetch_and_filter "$INPUT_URL" "$COUNT" "$INPUT_FILENAME"
+          else
+            # Все списки из sources.json
+            if [ ! -f sources.json ]; then
+              echo "No sources.json found"
+              exit 0
+            fi
+
+            LIST_COUNT=$(jq '.lists | length' sources.json)
+            echo "Found $LIST_COUNT lists in sources.json"
+
+            for i in $(seq 0 $((LIST_COUNT - 1))); do
+              URL=$(jq -r ".lists[$i].url" sources.json)
+              FILENAME=$(jq -r ".lists[$i].filename" sources.json)
+              ITEMS=$(jq -r ".lists[$i].count" sources.json)
+
+              # Входной count перекрывает sources.json
+              if [ "$INPUT_COUNT" != "0" ] && [ -n "$INPUT_COUNT" ]; then
+                ITEMS="$INPUT_COUNT"
+              fi
+
+              [ "$ITEMS" = "null" ] || [ -z "$ITEMS" ] && ITEMS=20
+
+              fetch_and_filter "$URL" "$ITEMS" "$FILENAME"
+            done
+          fi
 
       - name: Commit and push
         run: |
