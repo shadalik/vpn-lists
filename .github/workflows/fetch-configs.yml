@@ -337,22 +337,8 @@ jobs:
             # Фильтруем битые конфиги которые роняют Xray Checker
             local TMPFIXED=$(mktemp)
             grep -vE 'security=(false|none)' "$TMPRAW" | \
-            grep -vE '&pbk=(?:$|&)' | \
-            grep -vE '^\s*$' > "$TMPFIXED"
-
-            # Удаляем конфиги с пустым password (trojan://@host...)
-            local TMPFIXED2=$(mktemp)
-            while IFS= read -r LINE; do
-              if echo "$LINE" | grep -q '^trojan://'; then
-                local PASS=$(echo "$LINE" | sed -E 's|^trojan://([^@]*)@.*|\1|')
-                if [ -n "$PASS" ]; then
-                  echo "$LINE" >> "$TMPFIXED2"
-                fi
-              else
-                echo "$LINE" >> "$TMPFIXED2"
-              fi
-            done < "$TMPFIXED"
-            mv "$TMPFIXED2" "$TMPFIXED"
+            grep -vE '^\s*$' | \
+            awk '/^vless:\/\// { if ($0 ~ /security=reality/ && $0 !~ /pbk=[0-9a-fA-F]{10,}/) next; if ($0 !~ /security=(reality|tls)/) next; print; next } /^trojan:\/\// { match($0, /^trojan:\/\/([^@]*)@/, arr); if (arr[1] == "") next; print; next } { print }' > "$TMPFIXED"
 
             local FILTERED=$(wc -l < "$TMPFIXED")
             local REMOVED=$(($(wc -l < "$TMPRAW") - FILTERED))
