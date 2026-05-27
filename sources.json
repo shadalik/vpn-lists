@@ -5,6 +5,7 @@
       "count": 10,
       "protocols": ["vless", "trojan"],
       "random": true,
+      "xray_checker": false,
       "sources": [
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
         "https://gbr.mydan.online/configs",
@@ -16,6 +17,7 @@
       "count": 10,
       "protocols": ["vless", "trojan"],
       "random": true,
+      "xray_checker": false,
       "sources": [
         "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt"
       ]
