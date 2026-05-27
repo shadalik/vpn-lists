@@ -157,9 +157,9 @@ jobs:
             fi
 
             # Фильтруем по индексам живых
-            echo "$PROXIES" | jq -r '.data[] | select(.online) | .index' | while read -r idx; do
-              sed -n "$((idx + 1))p" "$TMPFIXED"
-            done | head -n "$TARGET" > "$OUTFILE"
+            echo "$PROXIES" | jq -r '.data[] | select(.online) | .index' | head -n "$TARGET" > /tmp/xray_alive_indices.txt
+            awk 'NR==FNR{idx[$1];next} (FNR-1) in idx' /tmp/xray_alive_indices.txt "$TMPFIXED" > "$OUTFILE"
+            rm -f /tmp/xray_alive_indices.txt
 
             local FINAL=$(wc -l < "$OUTFILE")
             echo "  Result: $FINAL alive configs saved"
