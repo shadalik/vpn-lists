@@ -162,17 +162,12 @@ jobs:
               SUM_TARGET=$((SUM_TARGET + ITEMS))
 
               local GREP_PATTERN="^($(echo "$PROTOCOLS" | tr ',' '|'))://"
-              local FETCH=$((ITEMS * 3))
 
               local SRC_COUNT=$(echo "$ENTRY" | jq -r '.sources | length')
               for (( si=0; si<SRC_COUNT; si++ )); do
                 local URL=$(echo "$ENTRY" | jq -r ".sources[$si]")
                 echo "  <- $URL (protocols=$PROTOCOLS, count=$ITEMS, random=$RANDOMIZE)"
-                if [ "$RANDOMIZE" = "true" ]; then
-                  curl -sL "$URL" | grep -E "$GREP_PATTERN" | shuf | head -n "$FETCH" >> "$TMPRAW"
-                else
-                  curl -sL "$URL" | grep -E "$GREP_PATTERN" | head -n "$FETCH" >> "$TMPRAW"
-                fi
+                curl -sL "$URL" | grep -E "$GREP_PATTERN" >> "$TMPRAW"
               done
             done < <(jq -c ".lists[] | select(.filename == \"$FILENAME\")" sources.json)
 
@@ -225,7 +220,7 @@ jobs:
             echo "=== $INPUT_FILENAME: target=$COUNT, protocols=$PROTOCOLS ==="
             GREP_PATTERN="^($(echo "$PROTOCOLS" | tr ',' '|'))://"
             TMPRAW=$(mktemp)
-            curl -sL "$INPUT_URL" | grep -E "$GREP_PATTERN" | shuf | head -n "$COUNT" > "$TMPRAW"
+            curl -sL "$INPUT_URL" | grep -E "$GREP_PATTERN" > "$TMPRAW"
             mkdir -p configs
             OUTFILE="configs/$INPUT_FILENAME"
             if ! check_with_xray "$TMPRAW" "$COUNT" "$OUTFILE"; then
