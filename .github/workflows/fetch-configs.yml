@@ -66,9 +66,9 @@ jobs:
             # Кодируем конфиги в Base64 (формат подписки Xray Checker)
             local BASE64=$(base64 -w0 < "$TMPRAW")
 
+            # Передаём Base64 через переменную окружения (CLI-аргумент слишком длинный для сотен конфигов)
             # Запускаем Xray Checker в фоне (без --run-once, т.к. он убивает процесс до чтения API)
-            ./xray-checker \
-              --subscription-url="$BASE64" \
+            SUBSCRIPTION_URL="$BASE64" ./xray-checker \
               --proxy-timeout=15 \
               --proxy-check-interval=86400 \
               --proxy-check-method=ip \
