@@ -7,6 +7,7 @@
       "random": true,
       "sources": [
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
+        "https://gbr.mydan.online/configs",
         "https://raw.githubusercontent.com/zieng2/wl/refs/heads/main/vless_lite.txt"
       ]
     },
