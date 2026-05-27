@@ -22,12 +22,11 @@ on:
         default: "vless"
         type: string
       checker:
-        description: "Чекер: sing-box (реальная проверка), xray (Xray Core) или tcp (только порт)"
+        description: "Чекер: xray (реальная проверка через Xray Core) или tcp (только порт)"
         required: false
-        default: "sing-box"
+        default: "xray"
         type: choice
         options:
-          - sing-box
           - xray
           - tcp
   schedule:
@@ -43,291 +42,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download sing-box
+      - name: Download Xray Checker
         run: |
           ARCH=$(uname -m)
           case "$ARCH" in
             x86_64) ARCH="amd64" ;;
             aarch64) ARCH="arm64" ;;
           esac
-          VERSION=$(curl -sL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name')
-          echo "Downloading sing-box $VERSION for $ARCH"
-          curl -sL "https://github.com/SagerNet/sing-box/releases/download/${VERSION}/sing-box-${VERSION#v}-linux-${ARCH}.tar.gz" | tar xz --strip-components=1
-          chmod +x sing-box
-          ./sing-box version
-
-      - name: Download Xray Checker
-        run: |
-          INPUT_CHECKER="${{ github.event.inputs.checker }}"
-          if [ "$INPUT_CHECKER" = "xray" ]; then
-            NEED_XRAY="true"
-          elif [ -n "$INPUT_CHECKER" ] && [ "$INPUT_CHECKER" != "" ]; then
-            NEED_XRAY="false"
-          else
-            NEED_XRAY=$(jq -r '[.lists[].checker // "sing-box"] | map(select(. == "xray")) | length > 0' sources.json)
-          fi
-
-          if [ "$NEED_XRAY" = "true" ]; then
-            echo "Xray Checker needed, downloading..."
-            ARCH=$(uname -m)
-            case "$ARCH" in
-              x86_64) ARCH="amd64" ;;
-              aarch64) ARCH="arm64" ;;
-            esac
-            VERSION=$(curl -sL "https://api.github.com/repos/kutovoys/xray-checker/releases/latest" | jq -r '.tag_name')
-            echo "Downloading xray-checker $VERSION for $ARCH"
-            curl -sL "https://github.com/kutovoys/xray-checker/releases/download/${VERSION}/xray-checker-${VERSION}-linux-${ARCH}.tar.gz" | tar xz
-            chmod +x xray-checker
-            ./xray-checker --version
-          else
-            echo "Xray Checker not needed, skipping"
-          fi
+          VERSION=$(curl -sL "https://api.github.com/repos/kutovoys/xray-checker/releases/latest" | jq -r '.tag_name')
+          echo "Downloading xray-checker $VERSION for $ARCH"
+          curl -sL "https://github.com/kutovoys/xray-checker/releases/download/${VERSION}/xray-checker-${VERSION}-linux-${ARCH}.tar.gz" | tar xz
+          chmod +x xray-checker
+          ./xray-checker --version
 
       - name: Fetch and check configs
         run: |
-          # === sing-box checker ===
-          check_one_singbox() {
-            local LINE="$1"
-            local PORT="$2"
-            local OUTFILE="$3"
-
-            local SCHEME=$(echo "$LINE" | sed -E 's|^([a-z]+)://.*|\1|')
-            local WITHOUT_SCHEME=$(echo "$LINE" | sed -E 's|^[a-z]+://||')
-            local USERINFO=$(echo "$WITHOUT_SCHEME" | sed -E 's|@.*||')
-            local AFTER_AT=$(echo "$WITHOUT_SCHEME" | sed -E 's|[^@]*@||')
-            local HOST=$(echo "$AFTER_AT" | sed -E 's|[:/?#].*||')
-            local PORT_STR=$(echo "$AFTER_AT" | sed -E 's|[^:]*:([0-9]+).*|\1|')
-            local QUERY=$(echo "$LINE" | sed -E 's|^[^?]*\?([^#]*).*|\1|')
-
-            if [ -z "$HOST" ] || [ -z "$PORT_STR" ]; then
-              return 1
-            fi
-
-            # Извлекаем параметры
-            local PARAM_SNI=$(echo "$QUERY" | grep -oP '(?<=sni=)[^&#]*' || true)
-            local PARAM_PBK=$(echo "$QUERY" | grep -oP '(?<=pbk=)[^&#]*' || true)
-            local PARAM_SID=$(echo "$QUERY" | grep -oP '(?<=sid=)[^&#]*' || true)
-            local PARAM_FLOW=$(echo "$QUERY" | grep -oP '(?<=flow=)[^&#]*' || true)
-            local PARAM_SECURITY=$(echo "$QUERY" | grep -oP '(?<=security=)[^&#]*' || true)
-            local PARAM_TYPE=$(echo "$QUERY" | grep -oP '(?<=type=)[^&#]*' || true)
-            local PARAM_FP=$(echo "$QUERY" | grep -oP '(?<=fp=)[^&#]*' || true)
-
-            # Фильтруем битые
-            if [ "$PARAM_SECURITY" = "none" ] || [ "$PARAM_SECURITY" = "false" ]; then
-              return 1
-            fi
-
-            local OUTBOUND=""
-
-            if [ "$SCHEME" = "vless" ]; then
-              if [ -z "$PARAM_PBK" ]; then
-                # Нет pbk — не reality, проверяем tls
-                if [ "$PARAM_SECURITY" != "tls" ] && [ "$PARAM_SECURITY" != "reality" ]; then
-                  return 1
-                fi
-              fi
-
-              OUTBOUND=$(jq -n \
-                --arg server "$HOST" \
-                --argjson port "$PORT_STR" \
-                --arg uuid "$USERINFO" \
-                --arg flow "$PARAM_FLOW" \
-                --arg security "$PARAM_SECURITY" \
-                --arg sni "$PARAM_SNI" \
-                --arg pbk "$PARAM_PBK" \
-                --arg sid "$PARAM_SID" \
-                --arg fp "$PARAM_FP" \
-                --arg net_type "$PARAM_TYPE" '{
-                type: "vless",
-                tag: "proxy",
-                server: $server,
-                server_port: $port,
-                uuid: $uuid,
-                flow: (if $flow != "" then $flow else null end),
-                network: (if $net_type == "ws" or $net_type == "grpc" or $net_type == "http" or $net_type == "httpupgrade" then $net_type else "tcp" end),
-                tls: (if $security == "reality" then {
-                  enabled: true,
-                  server_name: $sni,
-                  utls: { enabled: true, fingerprint: (if $fp != "" then $fp else "chrome" end) },
-                  reality: { enabled: true, public_key: $pbk, short_id: $sid }
-                } elif $security == "tls" then {
-                  enabled: true,
-                  server_name: $sni,
-                  insecure: true
-                } else null end)
-              } | with_entries(select(.value != null))')
-
-            elif [ "$SCHEME" = "trojan" ]; then
-              if [ -z "$USERINFO" ]; then
-                return 1
-              fi
-              OUTBOUND=$(jq -n \
-                --arg server "$HOST" \
-                --argjson port "$PORT_STR" \
-                --arg password "$USERINFO" \
-                --arg sni "$PARAM_SNI" \
-                --arg fp "$PARAM_FP" '{
-                type: "trojan",
-                tag: "proxy",
-                server: $server,
-                server_port: $port,
-                password: $password,
-                tls: {
-                  enabled: true,
-                  server_name: (if $sni != "" then $sni else $server end),
-                  insecure: true,
-                  utls: (if $fp != "" then { enabled: true, fingerprint: $fp } else null end)
-                }
-              } | with_entries(select(.value != null))')
-
-            elif [ "$SCHEME" = "ss" ]; then
-              # shadowsocks://base64@host:port или ss://base64
-              OUTBOUND=$(jq -n \
-                --arg server "$HOST" \
-                --argjson port "$PORT_STR" \
-                --arg method "$USERINFO" '{
-                type: "shadowsocks",
-                tag: "proxy",
-                server: $server,
-                server_port: $port,
-                method: "auto",
-                password: $method
-              }')
-            else
-              return 1
-            fi
-
-            # Генерируем конфиг
-            local CFGFILE=$(mktemp /tmp/singbox-XXXXX.json)
-            jq -n --argjson out "$OUTBOUND" --argjson port "$PORT" '{
-              log: { level: "error" },
-              inbounds: [{ type: "socks", listen: "127.0.0.1", listen_port: $port }],
-              outbounds: [$out, { type: "direct", tag: "direct" }],
-              route: { rules: [{ outbound: "proxy" }] }
-            }' > "$CFGFILE"
-
-            # Запускаем sing-box
-            ./sing-box run -c "$CFGFILE" &>/dev/null &
-            local PID=$!
-
-            # Ждём порт
-            local WAIT=0
-            until nc -z 127.0.0.1 "$PORT" 2>/dev/null; do
-              sleep 0.2
-              WAIT=$((WAIT + 1))
-              if [ "$WAIT" -ge 25 ]; then
-                kill $PID 2>/dev/null; wait $PID 2>/dev/null
-                rm -f "$CFGFILE"
-                return 1
-              fi
-            done
-
-            # Проверяем через SOCKS5
-            local HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --socks5-hostname 127.0.0.1 "$PORT" \
-              --connect-timeout 8 --max-time 10 \
-              "http://connectivitycheck.gstatic.com/generate_204" 2>/dev/null || echo "000")
-
-            kill $PID 2>/dev/null; wait $PID 2>/dev/null
-            rm -f "$CFGFILE"
-
-            if [ "$HTTP_CODE" = "204" ]; then
-              return 0
-            fi
-            return 1
-          }
-
-          # === sing-box checker с параллелизмом ===
-          check_with_singbox() {
-            local TMPRAW="$1"
-            local TARGET="$2"
-            local OUTFILE="$3"
-            local WORKERS="${4:-10}"
-
-            # Фильтруем битые конфиги
-            local TMPFIXED=$(mktemp)
-            grep -vE 'security=(false|none)' "$TMPRAW" | \
-            grep -vE '&pbk=(?:$|&)' | \
-            grep -vE '^\s*$' > "$TMPFIXED"
-
-            # Удаляем конфиги с пустым password (trojan://@host...)
-            local TMPFIXED2=$(mktemp)
-            while IFS= read -r LINE; do
-              if echo "$LINE" | grep -q '^trojan://'; then
-                local PASS=$(echo "$LINE" | sed -E 's|^trojan://([^@]*)@.*|\1|')
-                if [ -n "$PASS" ]; then
-                  echo "$LINE" >> "$TMPFIXED2"
-                fi
-              else
-                echo "$LINE" >> "$TMPFIXED2"
-              fi
-            done < "$TMPFIXED"
-            mv "$TMPFIXED2" "$TMPFIXED"
-
-            local FILTERED=$(wc -l < "$TMPFIXED")
-            local REMOVED=$(($(wc -l < "$TMPRAW") - FILTERED))
-            [ "$REMOVED" -gt 0 ] && echo "  Filtered out $REMOVED broken configs"
-
-            local TOTAL=$FILTERED
-            if [ "$TOTAL" -eq 0 ]; then
-              echo "  No configs to check"
-              rm -f "$TMPFIXED"
-              return 1
-            fi
-
-            echo "  Checking $TOTAL configs with sing-box (target=$TARGET, workers=$WORKERS)..."
-
-            local TMPALIVE=$(mktemp)
-            local ALIVE=0
-            local BASE_PORT=20000
-
-            # Читаем все строки в массив
-            local ALL_LINES=()
-            while IFS= read -r LINE; do
-              ALL_LINES+=("$LINE")
-            done < "$TMPFIXED"
-
-            local IDX=0
-            while [ "$IDX" -lt "${#ALL_LINES[@]}" ] && [ "$ALIVE" -lt "$TARGET" ]; do
-              # Набираем батч
-              local PIDS=()
-              local BATCH_END=$((IDX + WORKERS))
-              [ "$BATCH_END" -gt "${#ALL_LINES[@]}" ] && BATCH_END=${#ALL_LINES[@]}
-
-              for ((i=IDX; i<BATCH_END; i++)); do
-                local PORT=$((BASE_PORT + (i - IDX)))
-                (
-                  if check_one_singbox "${ALL_LINES[$i]}" "$PORT" "/dev/null" 2>/dev/null; then
-                    echo "${ALL_LINES[$i]}" >> "$TMPALIVE"
-                  fi
-                ) &
-                PIDS+=($!)
-              done
-
-              for PID in "${PIDS[@]}"; do
-                wait "$PID" 2>/dev/null
-              done
-
-              ALIVE=$(wc -l < "$TMPALIVE" 2>/dev/null || echo 0)
-              echo "  Progress: $BATCH_END/$TOTAL checked, $ALIVE alive"
-              IDX=$BATCH_END
-            done
-
-            ALIVE=$(wc -l < "$TMPALIVE" 2>/dev/null || echo 0)
-            echo "  sing-box: $ALIVE/$TOTAL alive"
-
-            if [ "$ALIVE" -eq 0 ]; then
-              rm -f "$TMPFIXED" "$TMPALIVE"
-              return 1
-            fi
-
-            head -n "$TARGET" "$TMPALIVE" > "$OUTFILE"
-            local FINAL=$(wc -l < "$OUTFILE")
-            echo "  Result: $FINAL alive configs saved"
-            rm -f "$TMPFIXED" "$TMPALIVE"
-            return 0
-          }
-
           # Xray Checker — проверка через Xray Core
           check_with_xray() {
             local TMPRAW="$1"
@@ -353,7 +82,7 @@ jobs:
 
             echo "  Checking $TOTAL configs with Xray Checker (target=$TARGET)..."
 
-            # Кодируем в Base64 и раздаём через локальный HTTP-сервер (обходит лимит execve)
+            # Кодируем в Base64 и раздаём через локальный HTTP-сервер
             local BASE64FILE=$(mktemp)
             base64 -w0 < "$TMPFIXED" > "$BASE64FILE"
             python3 -m http.server 18888 --directory "$(dirname "$BASE64FILE")" --bind 127.0.0.1 &
@@ -361,7 +90,7 @@ jobs:
             local B64NAME=$(basename "$BASE64FILE")
             sleep 1
 
-            # Запускаем Xray Checker (без --run-once, чтобы health endpoint работал)
+            # Запускаем Xray Checker
             SUBSCRIPTION_URL="http://127.0.0.1:18888/$B64NAME" ./xray-checker \
               --proxy-timeout=15 \
               --proxy-check-interval=86400 \
@@ -422,7 +151,6 @@ jobs:
             if [ -z "$PROXIES" ]; then
               echo "  ERROR: failed to get proxy results (API unavailable)"
               rm -f "$TMPFIXED"
-              return 1
               return 1
             fi
 
@@ -522,7 +250,7 @@ jobs:
             if [ -n "${INPUT_CHECKER:-}" ] && [ "$INPUT_CHECKER" != "" ]; then
               CHECKER_TYPE="$INPUT_CHECKER"
             else
-              CHECKER_TYPE=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .checker // \"sing-box\"] | .[0]" sources.json)
+              CHECKER_TYPE=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .checker // \"xray\"] | .[0]" sources.json)
             fi
 
             echo "=== $FILENAME: target=$TARGET, checker=$CHECKER_TYPE ==="
@@ -572,18 +300,13 @@ jobs:
               return
             fi
 
-            if [ "$CHECKER_TYPE" = "xray" ]; then
-              if check_with_xray "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
-                rm -f "$TMPRAW"
-                return
-              fi
-            elif [ "$CHECKER_TYPE" = "tcp" ]; then
+            if [ "$CHECKER_TYPE" = "tcp" ]; then
               if check_with_tcp "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
                 rm -f "$TMPRAW"
                 return
               fi
             else
-              if check_with_singbox "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
+              if check_with_xray "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
                 rm -f "$TMPRAW"
                 return
               fi
@@ -621,12 +344,10 @@ jobs:
             curl -sL "$INPUT_URL" | grep -E "$GREP_PATTERN" > "$TMPRAW"
             mkdir -p configs
             OUTFILE="configs/$INPUT_FILENAME"
-            if [ "$INPUT_CHECKER" = "xray" ]; then
-              CHECKER_FN="check_with_xray"
-            elif [ "$INPUT_CHECKER" = "tcp" ]; then
+            if [ "$INPUT_CHECKER" = "tcp" ]; then
               CHECKER_FN="check_with_tcp"
             else
-              CHECKER_FN="check_with_singbox"
+              CHECKER_FN="check_with_xray"
             fi
             if ! $CHECKER_FN "$TMPRAW" "$COUNT" "$OUTFILE"; then
               if [ -f "$OUTFILE" ] && [ -s "$OUTFILE" ]; then
