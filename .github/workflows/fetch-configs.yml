@@ -16,6 +16,11 @@ on:
         description: "Имя выходного файла (обязательно если указан url)"
         required: false
         type: string
+      protocols:
+        description: "Протоколы через запятую (vless,vmess,trojan,shadowsocks,hysteria2,tuic)"
+        required: false
+        default: "vless"
+        type: string
       random:
         description: "Перемешивать конфиги перед выборкой (true/false)"
         required: false
@@ -55,9 +60,13 @@ jobs:
             local TARGET="$2"
             local FILENAME="$3"
             local RANDOMIZE="$4"
+            local PROTOCOLS="$5"
             local OUTFILE="configs/$FILENAME"
 
-            echo "=== $FILENAME: target=$TARGET configs ==="
+            echo "=== $FILENAME: target=$TARGET, protocols=$PROTOCOLS ==="
+
+            # Строим grep-паттерн из протоколов: ^(vless|vmess|trojan)://
+            local GREP_PATTERN="^($(echo "$PROTOCOLS" | tr ',' '|'))://"
 
             # Берём с запасом (x3), чтобы было из чего докачать
             local FETCH=$((TARGET * 3))
@@ -66,10 +75,10 @@ jobs:
             echo "  Fetching $FETCH configs from source..."
             if [ "$RANDOMIZE" = "true" ]; then
               echo "  Mode: random"
-              curl -sL "$URL" | grep '^vless://' | shuf | head -n "$FETCH" > "$TMPRAW"
+              curl -sL "$URL" | grep -E "$GREP_PATTERN" | shuf | head -n "$FETCH" > "$TMPRAW"
             else
               echo "  Mode: sequential"
-              curl -sL "$URL" | grep '^vless://' | head -n "$FETCH" > "$TMPRAW"
+              curl -sL "$URL" | grep -E "$GREP_PATTERN" | head -n "$FETCH" > "$TMPRAW"
             fi
             local TOTAL=$(wc -l < "$TMPRAW")
             echo "  Got $TOTAL configs from source"
@@ -107,6 +116,7 @@ jobs:
           INPUT_URL="${{ github.event.inputs.url }}"
           INPUT_COUNT="${{ github.event.inputs.count }}"
           INPUT_FILENAME="${{ github.event.inputs.filename }}"
+          INPUT_PROTOCOLS="${{ github.event.inputs.protocols }}"
           INPUT_RANDOM="${{ github.event.inputs.random }}"
           # По умолчанию (schedule) — без рандома
           [ -z "$INPUT_RANDOM" ] && INPUT_RANDOM="false"
@@ -119,7 +129,9 @@ jobs:
             fi
             COUNT="$INPUT_COUNT"
             [ "$COUNT" = "0" ] || [ -z "$COUNT" ] && COUNT=20
-            fetch_and_filter "$INPUT_URL" "$COUNT" "$INPUT_FILENAME" "$INPUT_RANDOM"
+            PROTOCOLS="$INPUT_PROTOCOLS"
+            [ -z "$PROTOCOLS" ] && PROTOCOLS="vless"
+            fetch_and_filter "$INPUT_URL" "$COUNT" "$INPUT_FILENAME" "$INPUT_RANDOM" "$PROTOCOLS"
           else
             # Все списки из sources.json
             if [ ! -f sources.json ]; then
@@ -134,15 +146,21 @@ jobs:
               URL=$(jq -r ".lists[$i].url" sources.json)
               FILENAME=$(jq -r ".lists[$i].filename" sources.json)
               ITEMS=$(jq -r ".lists[$i].count" sources.json)
+              PROTOCOLS=$(jq -r '.lists['"$i"'].protocols // ["vless"] | join(",")' sources.json)
 
               # Входной count перекрывает sources.json
               if [ "$INPUT_COUNT" != "0" ] && [ -n "$INPUT_COUNT" ]; then
                 ITEMS="$INPUT_COUNT"
               fi
 
+              # Входной protocols перекрывает sources.json
+              if [ -n "$INPUT_PROTOCOLS" ]; then
+                PROTOCOLS="$INPUT_PROTOCOLS"
+              fi
+
               [ "$ITEMS" = "null" ] || [ -z "$ITEMS" ] && ITEMS=20
 
-              fetch_and_filter "$URL" "$ITEMS" "$FILENAME" "$INPUT_RANDOM"
+              fetch_and_filter "$URL" "$ITEMS" "$FILENAME" "$INPUT_RANDOM" "$PROTOCOLS"
             done
           fi
 
