@@ -163,11 +163,11 @@ jobs:
             fi
 
             # Фильтруем по индексам живых
-            local INDICES_CMD="echo \"$PROXIES\" | jq -r '.data[] | select(.online) | .index'"
             if [ "$RANDOMIZE" = "true" ]; then
-              INDICES_CMD="$INDICES_CMD | shuf"
+              echo "$PROXIES" | jq -r '.data[] | select(.online) | .index' | shuf | head -n "$TARGET" > /tmp/xray_alive_indices.txt
+            else
+              echo "$PROXIES" | jq -r '.data[] | select(.online) | .index' | head -n "$TARGET" > /tmp/xray_alive_indices.txt
             fi
-            eval "$INDICES_CMD" | head -n "$TARGET" > /tmp/xray_alive_indices.txt
             awk 'NR==FNR{idx[$1];next} (FNR-1) in idx' /tmp/xray_alive_indices.txt "$TMPFIXED" > "$OUTFILE"
             rm -f /tmp/xray_alive_indices.txt
 
