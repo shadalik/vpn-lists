@@ -30,21 +30,106 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download Xray Checker
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) ARCH="amd64" ;;
+            aarch64) ARCH="arm64" ;;
+          esac
+          curl -sL "https://github.com/kutovoys/xray-checker/releases/latest/download/xray-checker_linux_${ARCH}.tar.gz" | tar xz
+          chmod +x xray-checker
+          ./xray-checker --version
+
       - name: Fetch and check configs
         run: |
-          check_alive() {
-            local HOSTPORT="$1"
-            local HOST=$(echo "$HOSTPORT" | cut -d: -f1)
-            local PORT=$(echo "$HOSTPORT" | cut -d: -f2)
-            [ -z "$HOST" ] || [ -z "$PORT" ] && return 1
-            timeout 3 bash -c "echo >/dev/tcp/$HOST/$PORT" 2>/dev/null
-          }
+          # Запуск Xray Checker для проверки конфигов через Xray Core
+          check_with_xray() {
+            local TMPRAW="$1"
+            local TARGET="$2"
+            local OUTFILE="$3"
 
-          extract_hostport() {
-            echo "$1" | sed -n 's|.*@\([^?]*\).*|\1|p'
+            local TOTAL=$(wc -l < "$TMPRAW")
+            if [ "$TOTAL" -eq 0 ]; then
+              echo "  No configs to check"
+              return 1
+            fi
+
+            echo "  Checking $TOTAL configs with Xray Checker (target=$TARGET)..."
+
+            # Кодируем конфиги в Base64 (формат подписки Xray Checker)
+            local BASE64=$(base64 -w0 < "$TMPRAW")
+
+            # Запускаем Xray Checker в фоне
+            ./xray-checker \
+              --subscription-url="$BASE64" \
+              --run-once=true \
+              --proxy-timeout=15 \
+              --proxy-check-method=ip \
+              --subscription-update=false \
+              --simulate-latency=false \
+              --metrics-port=2112 &
+            local PID=$!
+
+            # Ждём пока HTTP-сервер поднимется
+            local WAIT=0
+            until curl -sf http://localhost:2112/health >/dev/null 2>&1; do
+              sleep 1
+              WAIT=$((WAIT + 1))
+              if [ "$WAIT" -ge 30 ]; then
+                echo "  ERROR: Xray Checker didn't start in 30s"
+                kill $PID 2>/dev/null
+                return 1
+              fi
+            done
+            echo "  Xray Checker started (pid=$PID)"
+
+            # Поллим API пока все проверки не завершены
+            local POLLS=0
+            local MAX_POLLS=120
+            while [ "$POLLS" -lt "$MAX_POLLS" ]; do
+              local STATUS=$(curl -sf http://localhost:2112/api/v1/status 2>/dev/null)
+              if [ -n "$STATUS" ]; then
+                local ST=$(echo "$STATUS" | jq -r '.data.total // 0')
+                local SO=$(echo "$STATUS" | jq -r '.data.online // 0')
+                local SF=$(echo "$STATUS" | jq -r '.data.offline // 0')
+                echo "  Poll $POLLS: total=$ST online=$SO offline=$SF"
+                if [ "$ST" -gt 0 ] && [ "$ST" -eq "$((SO + SF))" ]; then
+                  break
+                fi
+              fi
+              sleep 2
+              POLLS=$((POLLS + 1))
+            done
+
+            # Получаем индексы живых конфигов
+            local PROXIES=$(curl -sf http://localhost:2112/api/v1/proxies 2>/dev/null)
+            kill $PID 2>/dev/null
+
+            if [ -z "$PROXIES" ]; then
+              echo "  ERROR: failed to get proxy results"
+              return 1
+            fi
+
+            local ALIVE=$(echo "$PROXIES" | jq -r '[.data[] | select(.online)] | length')
+            echo "  Xray Checker: $ALIVE/$TOTAL alive"
+
+            if [ "$ALIVE" -eq 0 ]; then
+              return 1
+            fi
+
+            # Фильтруем оригинальные конфиги по индексам живых
+            echo "$PROXIES" | jq -r '.data[] | select(.online) | .index' | while read -r idx; do
+              sed -n "$((idx + 1))p" "$TMPRAW"
+            done | head -n "$TARGET" > "$OUTFILE"
+
+            local FINAL=$(wc -l < "$OUTFILE")
+            echo "  Result: $FINAL alive configs saved"
+            return 0
           }
 
           fetch_and_save() {
@@ -58,21 +143,15 @@ jobs:
             local TMPRAW=$(mktemp)
             > "$TMPRAW"
 
-            local ENTRY_COUNT=$(jq -c ".lists[] | select(.filename == \"$FILENAME\")" sources.json | wc -l)
-            echo "  Sources: $ENTRY_COUNT"
-
             local SUM_TARGET=0
             while IFS= read -r ENTRY; do
               local ITEMS=$(echo "$ENTRY" | jq -r '.count')
               local PROTOCOLS=$(echo "$ENTRY" | jq -r '.protocols // ["vless"] | join(",")')
               local RANDOMIZE=$(echo "$ENTRY" | jq -r '.random // false')
 
-              # Входной count перекрывает sources.json
               if [ "${INPUT_COUNT:-0}" != "0" ] && [ -n "${INPUT_COUNT:-}" ]; then
                 ITEMS="$INPUT_COUNT"
               fi
-
-              # Входной protocols перекрывает sources.json
               if [ -n "${INPUT_PROTOCOLS:-}" ]; then
                 PROTOCOLS="$INPUT_PROTOCOLS"
               fi
@@ -83,7 +162,6 @@ jobs:
               local GREP_PATTERN="^($(echo "$PROTOCOLS" | tr ',' '|'))://"
               local FETCH=$((ITEMS * 3))
 
-              # Итерируем по массиву sources
               local SRC_COUNT=$(echo "$ENTRY" | jq -r '.sources | length')
               for (( si=0; si<SRC_COUNT; si++ )); do
                 local URL=$(echo "$ENTRY" | jq -r ".sources[$si]")
@@ -96,55 +174,34 @@ jobs:
               done
             done < <(jq -c ".lists[] | select(.filename == \"$FILENAME\")" sources.json)
 
-            local TOTAL=$(wc -l < "$TMPRAW")
-            echo "  Raw total: $TOTAL configs from all sources"
-
-            # Проверяем живость
-            local ALIVEFILE=$(mktemp)
-            local ALIVE=0
-            local CHECKED=0
-
-            # Перемешиваем если хотя бы один source random=true
+            # Перемешиваем если нужно
             local ANY_RANDOM=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .random // false] | any" sources.json)
             if [ "$ANY_RANDOM" = "true" ]; then
               shuf "$TMPRAW" -o "$TMPRAW"
             fi
 
-            while IFS= read -r LINE; do
-              [ -z "$LINE" ] && continue
-              CHECKED=$((CHECKED + 1))
-              local HP=$(extract_hostport "$LINE")
+            local RAWTOTAL=$(wc -l < "$TMPRAW")
+            echo "  Raw total: $RAWTOTAL configs"
 
-              if check_alive "$HP"; then
-                echo "  ALIVE: $HP"
-                echo "$LINE" >> "$ALIVEFILE"
-                ALIVE=$((ALIVE + 1))
-              else
-                echo "  DEAD:  $HP"
-              fi
-
-              [ "$ALIVE" -ge "$SUM_TARGET" ] && break
-            done < "$TMPRAW"
-
-            rm -f "$TMPRAW"
-
-            # Защита от пустого результата — сохраняем старый файл
-            if [ "$ALIVE" -eq 0 ]; then
-              if [ -f "$OUTFILE" ] && [ -s "$OUTFILE" ]; then
-                echo "  WARNING: no alive configs, keeping old file ($(wc -l < "$OUTFILE") configs)"
-              else
-                echo "  WARNING: no alive configs and no old file to keep"
-              fi
-              rm -f "$ALIVEFILE"
+            if [ "$RAWTOTAL" -eq 0 ]; then
+              echo "  WARNING: no configs fetched"
+              rm -f "$TMPRAW"
               return
             fi
 
-            # Берём не более SUM_TARGET живых
-            head -n "$SUM_TARGET" "$ALIVEFILE" > "$OUTFILE"
-            local FINAL=$(wc -l < "$OUTFILE")
+            # Проверяем через Xray Checker
+            if check_with_xray "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
+              rm -f "$TMPRAW"
+              return
+            fi
 
-            rm -f "$ALIVEFILE"
-            echo "  Result: $FINAL/$SUM_TARGET alive configs saved"
+            # Fallback: если Xray Checker не дал результатов — сохраняем старый файл
+            if [ -f "$OUTFILE" ] && [ -s "$OUTFILE" ]; then
+              echo "  WARNING: no alive configs, keeping old file ($(wc -l < "$OUTFILE") configs)"
+            else
+              echo "  WARNING: no alive configs and no old file to keep"
+            fi
+            rm -f "$TMPRAW"
           }
 
           # Определяем что запускать
@@ -163,32 +220,18 @@ jobs:
             [ "$COUNT" = "0" ] || [ -z "$COUNT" ] && COUNT=20
             PROTOCOLS="$INPUT_PROTOCOLS"
             [ -z "$PROTOCOLS" ] && PROTOCOLS="vless"
-            # Ручной запуск — перемешиваем по умолчанию
             echo "=== $INPUT_FILENAME: target=$COUNT, protocols=$PROTOCOLS ==="
             GREP_PATTERN="^($(echo "$PROTOCOLS" | tr ',' '|'))://"
             TMPRAW=$(mktemp)
             curl -sL "$INPUT_URL" | grep -E "$GREP_PATTERN" | shuf | head -n "$COUNT" > "$TMPRAW"
-            ALIVEFILE=$(mktemp)
-            ALIVE=0
-            while IFS= read -r LINE; do
-              [ -z "$LINE" ] && continue
-              HP=$(extract_hostport "$LINE")
-              if check_alive "$HP"; then
-                echo "  ALIVE: $HP"
-                echo "$LINE" >> "$ALIVEFILE"
-                ALIVE=$((ALIVE + 1))
-              else
-                echo "  DEAD:  $HP"
+            mkdir -p configs
+            OUTFILE="configs/$INPUT_FILENAME"
+            if ! check_with_xray "$TMPRAW" "$COUNT" "$OUTFILE"; then
+              if [ -f "$OUTFILE" ] && [ -s "$OUTFILE" ]; then
+                echo "  WARNING: no alive configs, keeping old file"
               fi
-              [ "$ALIVE" -ge "$COUNT" ] && break
-            done < "$TMPRAW"
-            if [ "$ALIVE" -eq 0 ] && [ -f "configs/$INPUT_FILENAME" ] && [ -s "configs/$INPUT_FILENAME" ]; then
-              echo "  WARNING: no alive configs, keeping old file"
-            else
-              head -n "$COUNT" "$ALIVEFILE" > "configs/$INPUT_FILENAME"
-              echo "  Result: $(wc -l < "configs/$INPUT_FILENAME")/$COUNT alive configs saved"
             fi
-            rm -f "$TMPRAW" "$ALIVEFILE"
+            rm -f "$TMPRAW"
           else
             # Все списки из sources.json
             if [ ! -f sources.json ]; then
@@ -201,10 +244,8 @@ jobs:
 
             mkdir -p configs
 
-            # Группируем по уникальным filename
             UNIQUE_FILES=$(jq -r '[.lists[].filename] | unique | .[]' sources.json)
             for FILENAME in $UNIQUE_FILES; do
-              # Считаем суммарный target для этого файла
               TARGET=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .count] | add" sources.json)
               [ "$TARGET" = "null" ] && TARGET=20
               fetch_and_save "$FILENAME" "$TARGET"
