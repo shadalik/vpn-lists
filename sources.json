@@ -4,13 +4,13 @@
       "url": "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
       "filename": "white-cidr-ru.txt",
       "count": 10,
-      "protocols": ["vless"]
+      "protocols": ["vless", "trojan"]
     },
     {
       "url": "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
       "filename": "black-ru.txt",
       "count": 10,
-      "protocols": ["vless"]
+      "protocols": ["vless", "trojan"]
     }
   ]
 }
