@@ -66,11 +66,11 @@ jobs:
             # Кодируем конфиги в Base64 (формат подписки Xray Checker)
             local BASE64=$(base64 -w0 < "$TMPRAW")
 
-            # Запускаем Xray Checker в фоне
+            # Запускаем Xray Checker в фоне (без --run-once, т.к. он убивает процесс до чтения API)
             ./xray-checker \
               --subscription-url="$BASE64" \
-              --run-once=true \
               --proxy-timeout=15 \
+              --proxy-check-interval=86400 \
               --proxy-check-method=ip \
               --subscription-update=false \
               --simulate-latency=false \
