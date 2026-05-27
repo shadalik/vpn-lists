@@ -43,7 +43,7 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -128,7 +128,7 @@ jobs:
               # Ждём пока online перестанет расти (Checker закончил проверку)
               local LAST_ONLINE=0
               local STABLE_POLLS=0
-              local MAX_STABLE=10  # 10 поллов × 5 сек = 50 сек стабильности
+              local MAX_STABLE=5  # 5 поллов × 5 сек = 25 сек стабильности
               local POLLS=0
               local MAX_POLLS=480
 
