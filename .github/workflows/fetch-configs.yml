@@ -47,37 +47,64 @@ jobs:
             echo "$1" | sed -n 's|.*@\([^?]*\).*|\1|p'
           }
 
-          fetch_and_filter() {
-            local URL="$1"
+          fetch_and_save() {
+            local FILENAME="$1"
             local TARGET="$2"
-            local FILENAME="$3"
-            local RANDOMIZE="$4"
-            local PROTOCOLS="$5"
             local OUTFILE="configs/$FILENAME"
 
-            echo "=== $FILENAME: target=$TARGET, protocols=$PROTOCOLS ==="
+            echo "=== $FILENAME: target=$TARGET ==="
 
-            # Строим grep-паттерн из протоколов: ^(vless|vmess|trojan)://
-            local GREP_PATTERN="^($(echo "$PROTOCOLS" | tr ',' '|'))://"
-
-            # Берём с запасом (x3), чтобы было из чего докачать
-            local FETCH=$((TARGET * 3))
+            # Собираем сырые конфиги со всех источников в один файл
             local TMPRAW=$(mktemp)
+            > "$TMPRAW"
 
-            echo "  Fetching $FETCH configs from source..."
-            if [ "$RANDOMIZE" = "true" ]; then
-              echo "  Mode: random"
-              curl -sL "$URL" | grep -E "$GREP_PATTERN" | shuf | head -n "$FETCH" > "$TMPRAW"
-            else
-              echo "  Mode: sequential"
-              curl -sL "$URL" | grep -E "$GREP_PATTERN" | head -n "$FETCH" > "$TMPRAW"
-            fi
+            local ENTRY_COUNT=$(jq -c ".lists[] | select(.filename == \"$FILENAME\")" sources.json | wc -l)
+            echo "  Sources: $ENTRY_COUNT"
+
+            local SUM_TARGET=0
+            while IFS= read -r ENTRY; do
+              local URL=$(echo "$ENTRY" | jq -r '.url')
+              local ITEMS=$(echo "$ENTRY" | jq -r '.count')
+              local PROTOCOLS=$(echo "$ENTRY" | jq -r '.protocols // ["vless"] | join(",")')
+              local RANDOMIZE=$(echo "$ENTRY" | jq -r '.random // false')
+
+              # Входной count перекрывает sources.json
+              if [ "${INPUT_COUNT:-0}" != "0" ] && [ -n "${INPUT_COUNT:-}" ]; then
+                ITEMS="$INPUT_COUNT"
+              fi
+
+              # Входной protocols перекрывает sources.json
+              if [ -n "${INPUT_PROTOCOLS:-}" ]; then
+                PROTOCOLS="$INPUT_PROTOCOLS"
+              fi
+
+              [ "$ITEMS" = "null" ] || [ -z "$ITEMS" ] && ITEMS=10
+              SUM_TARGET=$((SUM_TARGET + ITEMS))
+
+              local GREP_PATTERN="^($(echo "$PROTOCOLS" | tr ',' '|'))://"
+              local FETCH=$((ITEMS * 3))
+
+              echo "  <- $URL (protocols=$PROTOCOLS, count=$ITEMS, random=$RANDOMIZE)"
+              if [ "$RANDOMIZE" = "true" ]; then
+                curl -sL "$URL" | grep -E "$GREP_PATTERN" | shuf | head -n "$FETCH" >> "$TMPRAW"
+              else
+                curl -sL "$URL" | grep -E "$GREP_PATTERN" | head -n "$FETCH" >> "$TMPRAW"
+              fi
+            done < <(jq -c ".lists[] | select(.filename == \"$FILENAME\")" sources.json)
+
             local TOTAL=$(wc -l < "$TMPRAW")
-            echo "  Got $TOTAL configs from source"
+            echo "  Raw total: $TOTAL configs from all sources"
 
+            # Проверяем живость
             local ALIVEFILE=$(mktemp)
             local ALIVE=0
             local CHECKED=0
+
+            # Перемешиваем если хотя бы один source random=true
+            local ANY_RANDOM=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .random // false] | any" sources.json)
+            if [ "$ANY_RANDOM" = "true" ]; then
+              shuf "$TMPRAW" -o "$TMPRAW"
+            fi
 
             while IFS= read -r LINE; do
               [ -z "$LINE" ] && continue
@@ -92,16 +119,28 @@ jobs:
                 echo "  DEAD:  $HP"
               fi
 
-              # Достаточно живых — стоп
-              [ "$ALIVE" -ge "$TARGET" ] && break
+              [ "$ALIVE" -ge "$SUM_TARGET" ] && break
             done < "$TMPRAW"
 
-            # Берём ровно TARGET живых
-            head -n "$TARGET" "$ALIVEFILE" > "$OUTFILE"
+            rm -f "$TMPRAW"
+
+            # Защита от пустого результата — сохраняем старый файл
+            if [ "$ALIVE" -eq 0 ]; then
+              if [ -f "$OUTFILE" ] && [ -s "$OUTFILE" ]; then
+                echo "  WARNING: no alive configs, keeping old file ($(wc -l < "$OUTFILE") configs)"
+              else
+                echo "  WARNING: no alive configs and no old file to keep"
+              fi
+              rm -f "$ALIVEFILE"
+              return
+            fi
+
+            # Берём не более SUM_TARGET живых
+            head -n "$SUM_TARGET" "$ALIVEFILE" > "$OUTFILE"
             local FINAL=$(wc -l < "$OUTFILE")
 
-            rm -f "$TMPRAW" "$ALIVEFILE"
-            echo "  Result: $FINAL/$TARGET alive configs saved"
+            rm -f "$ALIVEFILE"
+            echo "  Result: $FINAL/$SUM_TARGET alive configs saved"
           }
 
           # Определяем что запускать
@@ -121,7 +160,31 @@ jobs:
             PROTOCOLS="$INPUT_PROTOCOLS"
             [ -z "$PROTOCOLS" ] && PROTOCOLS="vless"
             # Ручной запуск — перемешиваем по умолчанию
-            fetch_and_filter "$INPUT_URL" "$COUNT" "$INPUT_FILENAME" "true" "$PROTOCOLS"
+            echo "=== $INPUT_FILENAME: target=$COUNT, protocols=$PROTOCOLS ==="
+            GREP_PATTERN="^($(echo "$PROTOCOLS" | tr ',' '|'))://"
+            TMPRAW=$(mktemp)
+            curl -sL "$INPUT_URL" | grep -E "$GREP_PATTERN" | shuf | head -n "$COUNT" > "$TMPRAW"
+            ALIVEFILE=$(mktemp)
+            ALIVE=0
+            while IFS= read -r LINE; do
+              [ -z "$LINE" ] && continue
+              HP=$(extract_hostport "$LINE")
+              if check_alive "$HP"; then
+                echo "  ALIVE: $HP"
+                echo "$LINE" >> "$ALIVEFILE"
+                ALIVE=$((ALIVE + 1))
+              else
+                echo "  DEAD:  $HP"
+              fi
+              [ "$ALIVE" -ge "$COUNT" ] && break
+            done < "$TMPRAW"
+            if [ "$ALIVE" -eq 0 ] && [ -f "configs/$INPUT_FILENAME" ] && [ -s "configs/$INPUT_FILENAME" ]; then
+              echo "  WARNING: no alive configs, keeping old file"
+            else
+              head -n "$COUNT" "$ALIVEFILE" > "configs/$INPUT_FILENAME"
+              echo "  Result: $(wc -l < "configs/$INPUT_FILENAME")/$COUNT alive configs saved"
+            fi
+            rm -f "$TMPRAW" "$ALIVEFILE"
           else
             # Все списки из sources.json
             if [ ! -f sources.json ]; then
@@ -130,28 +193,17 @@ jobs:
             fi
 
             LIST_COUNT=$(jq '.lists | length' sources.json)
-            echo "Found $LIST_COUNT lists in sources.json"
+            echo "Found $LIST_COUNT entries in sources.json"
 
-            for i in $(seq 0 $((LIST_COUNT - 1))); do
-              URL=$(jq -r ".lists[$i].url" sources.json)
-              FILENAME=$(jq -r ".lists[$i].filename" sources.json)
-              ITEMS=$(jq -r ".lists[$i].count" sources.json)
-              PROTOCOLS=$(jq -r '.lists['"$i"'].protocols // ["vless"] | join(",")' sources.json)
-              RANDOMIZE=$(jq -r '.lists['"$i"'].random // false' sources.json)
+            mkdir -p configs
 
-              # Входной count перекрывает sources.json
-              if [ "$INPUT_COUNT" != "0" ] && [ -n "$INPUT_COUNT" ]; then
-                ITEMS="$INPUT_COUNT"
-              fi
-
-              # Входной protocols перекрывает sources.json
-              if [ -n "$INPUT_PROTOCOLS" ]; then
-                PROTOCOLS="$INPUT_PROTOCOLS"
-              fi
-
-              [ "$ITEMS" = "null" ] || [ -z "$ITEMS" ] && ITEMS=20
-
-              fetch_and_filter "$URL" "$ITEMS" "$FILENAME" "$RANDOMIZE" "$PROTOCOLS"
+            # Группируем по уникальным filename
+            UNIQUE_FILES=$(jq -r '[.lists[].filename] | unique | .[]' sources.json)
+            for FILENAME in $UNIQUE_FILES; do
+              # Считаем суммарный target для этого файла
+              TARGET=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .count] | add" sources.json)
+              [ "$TARGET" = "null" ] && TARGET=20
+              fetch_and_save "$FILENAME" "$TARGET"
             done
           fi
 
