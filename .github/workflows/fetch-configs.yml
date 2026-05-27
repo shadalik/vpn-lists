@@ -29,6 +29,11 @@ on:
         options:
           - xray
           - tcp
+      random:
+        description: "Перемешать живые конфиги рандомно перед выборкой"
+        required: false
+        default: "false"
+        type: boolean
   schedule:
     - cron: "0 * * * *"
 
@@ -62,6 +67,7 @@ jobs:
             local TMPRAW="$1"
             local TARGET="$2"
             local OUTFILE="$3"
+            local RANDOMIZE="${4:-false}"
 
             # Фильтруем битые конфиги которые роняют Xray Checker
             local TMPFIXED=$(mktemp)
@@ -157,7 +163,11 @@ jobs:
             fi
 
             # Фильтруем по индексам живых
-            echo "$PROXIES" | jq -r '.data[] | select(.online) | .index' | head -n "$TARGET" > /tmp/xray_alive_indices.txt
+            local INDICES_CMD="echo \"$PROXIES\" | jq -r '.data[] | select(.online) | .index'"
+            if [ "$RANDOMIZE" = "true" ]; then
+              INDICES_CMD="$INDICES_CMD | shuf"
+            fi
+            eval "$INDICES_CMD" | head -n "$TARGET" > /tmp/xray_alive_indices.txt
             awk 'NR==FNR{idx[$1];next} (FNR-1) in idx' /tmp/xray_alive_indices.txt "$TMPFIXED" > "$OUTFILE"
             rm -f /tmp/xray_alive_indices.txt
 
@@ -172,6 +182,7 @@ jobs:
             local TMPRAW="$1"
             local TARGET="$2"
             local OUTFILE="$3"
+            local RANDOMIZE="${4:-false}"
 
             local TMPFIXED=$(mktemp)
             grep -vE 'security=(false|none)' "$TMPRAW" | grep -vE '^\s*$' > "$TMPFIXED"
@@ -227,7 +238,11 @@ jobs:
               return 1
             fi
 
-            head -n "$TARGET" "$TMPALIVE" > "$OUTFILE"
+            if [ "$RANDOMIZE" = "true" ]; then
+              shuf "$TMPALIVE" | head -n "$TARGET" > "$OUTFILE"
+            else
+              head -n "$TARGET" "$TMPALIVE" > "$OUTFILE"
+            fi
             local FINAL=$(wc -l < "$OUTFILE")
             echo "  Result: $FINAL alive configs saved"
             rm -f "$TMPFIXED" "$TMPALIVE"
@@ -247,7 +262,15 @@ jobs:
               CHECKER_TYPE=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .checker // \"xray\"] | .[0]" sources.json)
             fi
 
-            echo "=== $FILENAME: target=$TARGET, checker=$CHECKER_TYPE ==="
+            # Определяем нужен ли рандом
+            local RANDOMIZE
+            if [ -n "${INPUT_RANDOM:-}" ] && [ "$INPUT_RANDOM" = "true" ]; then
+              RANDOMIZE="true"
+            else
+              RANDOMIZE=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .random // false] | any" sources.json)
+            fi
+
+            echo "=== $FILENAME: target=$TARGET, checker=$CHECKER_TYPE, random=$RANDOMIZE ==="
 
             # Собираем сырые конфиги со всех источников в один файл
             local TMPRAW=$(mktemp)
@@ -279,12 +302,6 @@ jobs:
               done
             done < <(jq -c ".lists[] | select(.filename == \"$FILENAME\")" sources.json)
 
-            # Перемешиваем если нужно
-            local ANY_RANDOM=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .random // false] | any" sources.json)
-            if [ "$ANY_RANDOM" = "true" ]; then
-              shuf "$TMPRAW" -o "$TMPRAW"
-            fi
-
             local RAWTOTAL=$(wc -l < "$TMPRAW")
             echo "  Raw total: $RAWTOTAL configs"
 
@@ -295,12 +312,12 @@ jobs:
             fi
 
             if [ "$CHECKER_TYPE" = "tcp" ]; then
-              if check_with_tcp "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
+              if check_with_tcp "$TMPRAW" "$SUM_TARGET" "$OUTFILE" "$RANDOMIZE"; then
                 rm -f "$TMPRAW"
                 return
               fi
             else
-              if check_with_xray "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
+              if check_with_xray "$TMPRAW" "$SUM_TARGET" "$OUTFILE" "$RANDOMIZE"; then
                 rm -f "$TMPRAW"
                 return
               fi
@@ -321,6 +338,7 @@ jobs:
           INPUT_FILENAME="${{ github.event.inputs.filename }}"
           INPUT_PROTOCOLS="${{ github.event.inputs.protocols }}"
           INPUT_CHECKER="${{ github.event.inputs.checker }}"
+          INPUT_RANDOM="${{ github.event.inputs.random }}"
 
           if [ -n "$INPUT_URL" ]; then
             # Ручной запуск с URL
@@ -343,7 +361,7 @@ jobs:
             else
               CHECKER_FN="check_with_xray"
             fi
-            if ! $CHECKER_FN "$TMPRAW" "$COUNT" "$OUTFILE"; then
+            if ! $CHECKER_FN "$TMPRAW" "$COUNT" "$OUTFILE" "$INPUT_RANDOM"; then
               if [ -f "$OUTFILE" ] && [ -s "$OUTFILE" ]; then
                 echo "  WARNING: no alive configs, keeping old file"
               fi
