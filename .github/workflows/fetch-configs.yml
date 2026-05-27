@@ -41,7 +41,9 @@ jobs:
             x86_64) ARCH="amd64" ;;
             aarch64) ARCH="arm64" ;;
           esac
-          curl -sL "https://github.com/kutovoys/xray-checker/releases/latest/download/xray-checker_linux_${ARCH}.tar.gz" | tar xz
+          VERSION=$(curl -sL "https://api.github.com/repos/kutovoys/xray-checker/releases/latest" | jq -r '.tag_name')
+          echo "Downloading xray-checker $VERSION for $ARCH"
+          curl -sL "https://github.com/kutovoys/xray-checker/releases/download/${VERSION}/xray-checker-${VERSION}-linux-${ARCH}.tar.gz" | tar xz
           chmod +x xray-checker
           ./xray-checker --version
 
