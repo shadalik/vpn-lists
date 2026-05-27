@@ -1,25 +1,23 @@
 {
   "lists": [
     {
-      "url": "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
       "filename": "white-cidr-ru.txt",
-      "count": 5,
+      "count": 10,
       "protocols": ["vless", "trojan"],
-      "random": true
+      "random": true,
+      "sources": [
+        "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
+        "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt"
+      ]
     },
     {
-      "url": "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
-      "filename": "white-cidr-ru.txt",
-      "count": 5,
-      "protocols": ["vless", "trojan"],
-      "random": true
-    },
-    {
-      "url": "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt",
       "filename": "black-ru.txt",
       "count": 10,
       "protocols": ["vless", "trojan"],
-      "random": true
+      "random": true,
+      "sources": [
+        "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt"
+      ]
     }
   ]
 }
