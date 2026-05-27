@@ -361,18 +361,17 @@ jobs:
             local B64NAME=$(basename "$BASE64FILE")
             sleep 1
 
-            # Запускаем Xray Checker
+            # Запускаем Xray Checker (без --run-once, чтобы health endpoint работал)
             SUBSCRIPTION_URL="http://127.0.0.1:18888/$B64NAME" ./xray-checker \
               --proxy-timeout=15 \
               --proxy-check-interval=86400 \
               --proxy-check-method=ip \
               --subscription-update=false \
               --simulate-latency=false \
-              --run-once \
               --metrics-port=2112 &
             local PID=$!
 
-            # Ждём пока health endpoint ответит ИЛИ процесс завершится
+            # Ждём пока health endpoint ответит (до 120 сек)
             local WAIT=0
             local HEALTH_OK=false
             while [ "$WAIT" -lt 120 ]; do
@@ -395,10 +394,6 @@ jobs:
               local POLLS=0
               local MAX_POLLS=480
               while [ "$POLLS" -lt "$MAX_POLLS" ]; do
-                if ! kill -0 $PID 2>/dev/null; then
-                  echo "  Xray Checker finished (process exited)"
-                  break
-                fi
                 local STATUS=$(curl -sf http://localhost:2112/api/v1/status 2>/dev/null)
                 if [ -n "$STATUS" ]; then
                   local ST=$(echo "$STATUS" | jq -r '.data.total // 0')
@@ -414,14 +409,13 @@ jobs:
                 POLLS=$((POLLS + 1))
               done
             else
-              echo "  Xray Checker health not responding after ${WAIT}s, waiting for process..."
-              # Ждём завершения процесса (run-once проверит и выйдет)
-              wait $PID 2>/dev/null || true
+              echo "  Xray Checker health not responding after ${WAIT}s"
             fi
 
             # Получаем индексы живых конфигов
             local PROXIES=$(curl -sf http://localhost:2112/api/v1/proxies 2>/dev/null)
             kill $PID 2>/dev/null
+            wait $PID 2>/dev/null || true
             kill $HTTP_PID 2>/dev/null
             rm -f "$BASE64FILE"
 
