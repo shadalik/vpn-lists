@@ -2,11 +2,12 @@
   "lists": [
     {
       "filename": "white-ru.txt",
-      "count": 10,
+      "count": 15,
       "protocols": ["vless", "trojan"],
-      "random": true,
+      "random": false,
       "xray_checker": false,
       "sources": [
+        "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/26.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
         "https://gbr.mydan.online/configs",
         "https://raw.githubusercontent.com/zieng2/wl/refs/heads/main/vless_lite.txt"
@@ -14,11 +15,13 @@
     },
     {
       "filename": "black-ru.txt",
-      "count": 10,
+      "count": 15,
       "protocols": ["vless", "trojan"],
-      "random": true,
+      "random": false,
       "xray_checker": false,
       "sources": [
+        "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/1.txt",
+        "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/6.txt",
         "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt"
       ]
     }
