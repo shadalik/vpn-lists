@@ -39,7 +39,7 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -375,13 +375,14 @@ jobs:
             local B64NAME=$(basename "$BASE64FILE")
             sleep 1
 
-            # Запускаем Xray Checker
+            # Запускаем Xray Checker (run-once: проверяет один раз и выходит)
             SUBSCRIPTION_URL="http://127.0.0.1:18888/$B64NAME" ./xray-checker \
               --proxy-timeout=15 \
               --proxy-check-interval=86400 \
               --proxy-check-method=ip \
               --subscription-update=false \
               --simulate-latency=false \
+              --run-once \
               --metrics-port=2112 &
             local PID=$!
 
@@ -400,10 +401,19 @@ jobs:
             done
             echo "  Xray Checker started (pid=$PID)"
 
+            # Ждём пока Checker загрузит конфиги и начнёт проверки
+            sleep 5
+
             # Поллим API пока все проверки не завершены
+            # --run-once: процесс завершится после проверки всех прокси
             local POLLS=0
-            local MAX_POLLS=240
+            local MAX_POLLS=480  # 16 мин (2101 × 15 сек timeout / 60 ≈ 8.7 мин + запас)
             while [ "$POLLS" -lt "$MAX_POLLS" ]; do
+              # Проверяем что процесс ещё жив
+              if ! kill -0 $PID 2>/dev/null; then
+                echo "  Xray Checker finished (process exited)"
+                break
+              fi
               local STATUS=$(curl -sf http://localhost:2112/api/v1/status 2>/dev/null)
               if [ -n "$STATUS" ]; then
                 local ST=$(echo "$STATUS" | jq -r '.data.total // 0')
@@ -411,12 +421,16 @@ jobs:
                 local SF=$(echo "$STATUS" | jq -r '.data.offline // 0')
                 echo "  Poll $POLLS: total=$ST online=$SO offline=$SF"
                 if [ "$ST" -gt 0 ] && [ "$ST" -eq "$((SO + SF))" ]; then
+                  echo "  All $ST configs checked"
                   break
                 fi
               fi
               sleep 2
               POLLS=$((POLLS + 1))
             done
+
+            # Дожидаемся завершения процесса
+            wait $PID 2>/dev/null || true
 
             # Получаем индексы живых конфигов
             local PROXIES=$(curl -sf http://localhost:2112/api/v1/proxies 2>/dev/null)
