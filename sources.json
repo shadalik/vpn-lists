@@ -4,7 +4,7 @@
       "filename": "white-ru.txt",
       "count": 15,
       "protocols": ["vless", "trojan"],
-      "random": false,
+      "random": true,
       "sources": [
         "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/26.txt",
         "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
@@ -16,7 +16,7 @@
       "filename": "black-ru.txt",
       "count": 15,
       "protocols": ["vless", "trojan"],
-      "random": false,
+      "random": true,
       "sources": [
         "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/1.txt",
         "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/6.txt",
