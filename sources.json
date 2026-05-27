@@ -3,7 +3,7 @@
     {
       "filename": "white-ru.txt",
       "count": 15,
-      "protocols": ["vless", "trojan"],
+      "protocols": ["vless"],
       "random": true,
       "checker": "xray",
       "sources": [
@@ -16,7 +16,7 @@
     {
       "filename": "black-ru.txt",
       "count": 15,
-      "protocols": ["vless", "trojan"],
+      "protocols": ["vless"],
       "random": true,
       "checker": "xray",
       "sources": [
