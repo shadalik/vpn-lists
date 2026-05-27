@@ -21,11 +21,14 @@ on:
         required: false
         default: "vless"
         type: string
-      xray_checker:
-        description: "Проверять через Xray Checker (true) или TCP connect (false)"
+      checker:
+        description: "Чекер: sing-box (реальная проверка) или tcp (только порт)"
         required: false
-        default: "false"
-        type: boolean
+        default: "sing-box"
+        type: choice
+        options:
+          - sing-box
+          - tcp
   schedule:
     - cron: "0 * * * *"
 
@@ -39,45 +42,200 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Xray Checker
+      - name: Download sing-box
         run: |
-          # Проверяем нужен ли Xray Checker (если хотя бы один список использует xray_checker: true)
-          INPUT_XRAY_CHECKER="${{ github.event.inputs.xray_checker }}"
-          if [ "$INPUT_XRAY_CHECKER" = "true" ]; then
-            NEED_XRAY="true"
-          elif [ "$INPUT_XRAY_CHECKER" = "false" ]; then
-            NEED_XRAY="false"
-          else
-            NEED_XRAY=$(jq -r '[.lists[].xray_checker // true] | any' sources.json)
-          fi
-
-          if [ "$NEED_XRAY" = "true" ]; then
-            echo "Xray Checker needed, downloading..."
-            ARCH=$(uname -m)
-            case "$ARCH" in
-              x86_64) ARCH="amd64" ;;
-              aarch64) ARCH="arm64" ;;
-            esac
-            VERSION=$(curl -sL "https://api.github.com/repos/kutovoys/xray-checker/releases/latest" | jq -r '.tag_name')
-            echo "Downloading xray-checker $VERSION for $ARCH"
-            curl -sL "https://github.com/kutovoys/xray-checker/releases/download/${VERSION}/xray-checker-${VERSION}-linux-${ARCH}.tar.gz" | tar xz
-            chmod +x xray-checker
-            ./xray-checker --version
-          else
-            echo "All lists use TCP connect, skipping Xray Checker download"
-          fi
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) ARCH="amd64" ;;
+            aarch64) ARCH="arm64" ;;
+          esac
+          VERSION=$(curl -sL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name')
+          echo "Downloading sing-box $VERSION for $ARCH"
+          curl -sL "https://github.com/SagerNet/sing-box/releases/download/${VERSION}/sing-box-${VERSION#v}-linux-${ARCH}.tar.gz" | tar xz --strip-components=1
+          chmod +x sing-box
+          ./sing-box version
 
       - name: Fetch and check configs
         run: |
-          # Запуск Xray Checker для проверки конфигов через Xray Core
-          check_with_xray() {
+          # === sing-box checker ===
+          check_one_singbox() {
+            local LINE="$1"
+            local PORT="$2"
+            local OUTFILE="$3"
+
+            local SCHEME=$(echo "$LINE" | sed -E 's|^([a-z]+)://.*|\1|')
+            local WITHOUT_SCHEME=$(echo "$LINE" | sed -E 's|^[a-z]+://||')
+            local USERINFO=$(echo "$WITHOUT_SCHEME" | sed -E 's|@.*||')
+            local AFTER_AT=$(echo "$WITHOUT_SCHEME" | sed -E 's|[^@]*@||')
+            local HOST=$(echo "$AFTER_AT" | sed -E 's|[:/?#].*||')
+            local PORT_STR=$(echo "$AFTER_AT" | sed -E 's|[^:]*:([0-9]+).*|\1|')
+            local QUERY=$(echo "$LINE" | sed -E 's|^[^?]*\?([^#]*).*|\1|')
+
+            if [ -z "$HOST" ] || [ -z "$PORT_STR" ]; then
+              return 1
+            fi
+
+            # Извлекаем параметры
+            local PARAM_SNI=$(echo "$QUERY" | grep -oP '(?<=sni=)[^&#]*' || true)
+            local PARAM_PBK=$(echo "$QUERY" | grep -oP '(?<=pbk=)[^&#]*' || true)
+            local PARAM_SID=$(echo "$QUERY" | grep -oP '(?<=sid=)[^&#]*' || true)
+            local PARAM_FLOW=$(echo "$QUERY" | grep -oP '(?<=flow=)[^&#]*' || true)
+            local PARAM_SECURITY=$(echo "$QUERY" | grep -oP '(?<=security=)[^&#]*' || true)
+            local PARAM_TYPE=$(echo "$QUERY" | grep -oP '(?<=type=)[^&#]*' || true)
+            local PARAM_FP=$(echo "$QUERY" | grep -oP '(?<=fp=)[^&#]*' || true)
+
+            # Фильтруем битые
+            if [ "$PARAM_SECURITY" = "none" ] || [ "$PARAM_SECURITY" = "false" ]; then
+              return 1
+            fi
+
+            local OUTBOUND=""
+
+            if [ "$SCHEME" = "vless" ]; then
+              if [ -z "$PARAM_PBK" ]; then
+                # Нет pbk — не reality, проверяем tls
+                if [ "$PARAM_SECURITY" != "tls" ] && [ "$PARAM_SECURITY" != "reality" ]; then
+                  return 1
+                fi
+              fi
+
+              OUTBOUND=$(jq -n \
+                --arg server "$HOST" \
+                --argjson port "$PORT_STR" \
+                --arg uuid "$USERINFO" \
+                --arg flow "$PARAM_FLOW" \
+                --arg security "$PARAM_SECURITY" \
+                --arg sni "$PARAM_SNI" \
+                --arg pbk "$PARAM_PBK" \
+                --arg sid "$PARAM_SID" \
+                --arg fp "$PARAM_FP" \
+                --arg net_type "$PARAM_TYPE" '{
+                type: "vless",
+                tag: "proxy",
+                server: $server,
+                server_port: $port,
+                uuid: $uuid,
+                flow: (if $flow != "" then $flow else null end),
+                network: (if $net_type == "ws" or $net_type == "grpc" or $net_type == "http" or $net_type == "httpupgrade" then $net_type else "tcp" end),
+                tls: (if $security == "reality" then {
+                  enabled: true,
+                  server_name: $sni,
+                  utls: { enabled: true, fingerprint: (if $fp != "" then $fp else "chrome" end) },
+                  reality: { enabled: true, public_key: $pbk, short_id: $sid }
+                } elif $security == "tls" then {
+                  enabled: true,
+                  server_name: $sni,
+                  insecure: true
+                } else null end)
+              } | with_entries(select(.value != null))')
+
+            elif [ "$SCHEME" = "trojan" ]; then
+              if [ -z "$USERINFO" ]; then
+                return 1
+              fi
+              OUTBOUND=$(jq -n \
+                --arg server "$HOST" \
+                --argjson port "$PORT_STR" \
+                --arg password "$USERINFO" \
+                --arg sni "$PARAM_SNI" \
+                --arg fp "$PARAM_FP" '{
+                type: "trojan",
+                tag: "proxy",
+                server: $server,
+                server_port: $port,
+                password: $password,
+                tls: {
+                  enabled: true,
+                  server_name: (if $sni != "" then $sni else $server end),
+                  insecure: true,
+                  utls: (if $fp != "" then { enabled: true, fingerprint: $fp } else null end)
+                }
+              } | with_entries(select(.value != null))')
+
+            elif [ "$SCHEME" = "ss" ]; then
+              # shadowsocks://base64@host:port или ss://base64
+              OUTBOUND=$(jq -n \
+                --arg server "$HOST" \
+                --argjson port "$PORT_STR" \
+                --arg method "$USERINFO" '{
+                type: "shadowsocks",
+                tag: "proxy",
+                server: $server,
+                server_port: $port,
+                method: "auto",
+                password: $method
+              }')
+            else
+              return 1
+            fi
+
+            # Генерируем конфиг
+            local CFGFILE=$(mktemp /tmp/singbox-XXXXX.json)
+            jq -n --argjson out "$OUTBOUND" --argjson port "$PORT" '{
+              log: { level: "error" },
+              inbounds: [{ type: "socks", listen: "127.0.0.1", listen_port: $port }],
+              outbounds: [$out, { type: "direct", tag: "direct" }],
+              route: { rules: [{ outbound: "proxy" }] }
+            }' > "$CFGFILE"
+
+            # Запускаем sing-box
+            ./sing-box run -c "$CFGFILE" &>/dev/null &
+            local PID=$!
+
+            # Ждём порт
+            local WAIT=0
+            until nc -z 127.0.0.1 "$PORT" 2>/dev/null; do
+              sleep 0.2
+              WAIT=$((WAIT + 1))
+              if [ "$WAIT" -ge 25 ]; then
+                kill $PID 2>/dev/null; wait $PID 2>/dev/null
+                rm -f "$CFGFILE"
+                return 1
+              fi
+            done
+
+            # Проверяем через SOCKS5
+            local HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --socks5-hostname 127.0.0.1 "$PORT" \
+              --connect-timeout 8 --max-time 10 \
+              "http://connectivitycheck.gstatic.com/generate_204" 2>/dev/null || echo "000")
+
+            kill $PID 2>/dev/null; wait $PID 2>/dev/null
+            rm -f "$CFGFILE"
+
+            if [ "$HTTP_CODE" = "204" ]; then
+              return 0
+            fi
+            return 1
+          }
+
+          # === sing-box checker с параллелизмом ===
+          check_with_singbox() {
             local TMPRAW="$1"
             local TARGET="$2"
             local OUTFILE="$3"
+            local WORKERS="${4:-10}"
 
-            # Фильтруем битые конфиги которые роняют Xray Checker
+            # Фильтруем битые конфиги
             local TMPFIXED=$(mktemp)
-            grep -v 'security=false' "$TMPRAW" | grep -v 'security=none' | grep -vE '^\s*$' > "$TMPFIXED"
+            grep -vE 'security=(false|none)' "$TMPRAW" | \
+            grep -vE '&pbk=(?:$|&)' | \
+            grep -vE '^\s*$' > "$TMPFIXED"
+
+            # Удаляем конфиги с пустым password (trojan://@host...)
+            local TMPFIXED2=$(mktemp)
+            while IFS= read -r LINE; do
+              if echo "$LINE" | grep -q '^trojan://'; then
+                local PASS=$(echo "$LINE" | sed -E 's|^trojan://([^@]*)@.*|\1|')
+                if [ -n "$PASS" ]; then
+                  echo "$LINE" >> "$TMPFIXED2"
+                fi
+              else
+                echo "$LINE" >> "$TMPFIXED2"
+              fi
+            done < "$TMPFIXED"
+            mv "$TMPFIXED2" "$TMPFIXED"
+
             local FILTERED=$(wc -l < "$TMPFIXED")
             local REMOVED=$(($(wc -l < "$TMPRAW") - FILTERED))
             [ "$REMOVED" -gt 0 ] && echo "  Filtered out $REMOVED broken configs"
@@ -89,99 +247,67 @@ jobs:
               return 1
             fi
 
-            echo "  Checking $TOTAL configs with Xray Checker (target=$TARGET)..."
+            echo "  Checking $TOTAL configs with sing-box (target=$TARGET, workers=$WORKERS)..."
 
-            # Кодируем в Base64 и раздаём через локальный HTTP-сервер (обходит лимит execve)
-            local BASE64FILE=$(mktemp)
-            base64 -w0 < "$TMPFIXED" > "$BASE64FILE"
-            python3 -m http.server 18888 --directory "$(dirname "$BASE64FILE")" --bind 127.0.0.1 &
-            local HTTP_PID=$!
-            local B64NAME=$(basename "$BASE64FILE")
-            sleep 1
+            local TMPALIVE=$(mktemp)
+            local ALIVE=0
+            local BASE_PORT=20000
 
-            # Запускаем Xray Checker (без --run-once, т.к. он убивает процесс до чтения API)
-            SUBSCRIPTION_URL="http://127.0.0.1:18888/$B64NAME" ./xray-checker \
-              --proxy-timeout=15 \
-              --proxy-check-interval=86400 \
-              --proxy-check-method=ip \
-              --subscription-update=false \
-              --simulate-latency=false \
-              --metrics-port=2112 &
-            local PID=$!
+            # Читаем все строки в массив
+            local ALL_LINES=()
+            while IFS= read -r LINE; do
+              ALL_LINES+=("$LINE")
+            done < "$TMPFIXED"
 
-            # Ждём пока HTTP-сервер поднимется
-            local WAIT=0
-            until curl -sf http://localhost:2112/health >/dev/null 2>&1; do
-              sleep 1
-              WAIT=$((WAIT + 1))
-              if [ "$WAIT" -ge 60 ]; then
-                echo "  ERROR: Xray Checker didn't start in 60s"
-                kill $PID 2>/dev/null
-                kill $HTTP_PID 2>/dev/null
-                rm -f "$TMPFIXED" "$BASE64FILE"
-                return 1
-              fi
-            done
-            echo "  Xray Checker started (pid=$PID)"
+            local IDX=0
+            while [ "$IDX" -lt "${#ALL_LINES[@]}" ] && [ "$ALIVE" -lt "$TARGET" ]; do
+              # Набираем батч
+              local PIDS=()
+              local BATCH_END=$((IDX + WORKERS))
+              [ "$BATCH_END" -gt "${#ALL_LINES[@]}" ] && BATCH_END=${#ALL_LINES[@]}
 
-            # Поллим API пока все проверки не завершены
-            local POLLS=0
-            local MAX_POLLS=240
-            while [ "$POLLS" -lt "$MAX_POLLS" ]; do
-              local STATUS=$(curl -sf http://localhost:2112/api/v1/status 2>/dev/null)
-              if [ -n "$STATUS" ]; then
-                local ST=$(echo "$STATUS" | jq -r '.data.total // 0')
-                local SO=$(echo "$STATUS" | jq -r '.data.online // 0')
-                local SF=$(echo "$STATUS" | jq -r '.data.offline // 0')
-                echo "  Poll $POLLS: total=$ST online=$SO offline=$SF"
-                if [ "$ST" -gt 0 ] && [ "$ST" -eq "$((SO + SF))" ]; then
-                  break
-                fi
-              fi
-              sleep 2
-              POLLS=$((POLLS + 1))
+              for ((i=IDX; i<BATCH_END; i++)); do
+                local PORT=$((BASE_PORT + (i - IDX)))
+                (
+                  if check_one_singbox "${ALL_LINES[$i]}" "$PORT" "/dev/null" 2>/dev/null; then
+                    echo "${ALL_LINES[$i]}" >> "$TMPALIVE"
+                  fi
+                ) &
+                PIDS+=($!)
+              done
+
+              for PID in "${PIDS[@]}"; do
+                wait "$PID" 2>/dev/null
+              done
+
+              ALIVE=$(wc -l < "$TMPALIVE" 2>/dev/null || echo 0)
+              echo "  Progress: $BATCH_END/$TOTAL checked, $ALIVE alive"
+              IDX=$BATCH_END
             done
 
-            # Получаем индексы живых конфигов
-            local PROXIES=$(curl -sf http://localhost:2112/api/v1/proxies 2>/dev/null)
-            kill $PID 2>/dev/null
-            kill $HTTP_PID 2>/dev/null
-            rm -f "$BASE64FILE"
-
-            if [ -z "$PROXIES" ]; then
-              echo "  ERROR: failed to get proxy results"
-              rm -f "$TMPFIXED"
-              return 1
-            fi
-
-            local ALIVE=$(echo "$PROXIES" | jq -r '[.data[] | select(.online)] | length')
-            echo "  Xray Checker: $ALIVE/$TOTAL alive"
+            ALIVE=$(wc -l < "$TMPALIVE" 2>/dev/null || echo 0)
+            echo "  sing-box: $ALIVE/$TOTAL alive"
 
             if [ "$ALIVE" -eq 0 ]; then
-              rm -f "$TMPFIXED"
+              rm -f "$TMPFIXED" "$TMPALIVE"
               return 1
             fi
 
-            # Фильтруем оригинальные конфиги по индексам живых
-            echo "$PROXIES" | jq -r '.data[] | select(.online) | .index' | while read -r idx; do
-              sed -n "$((idx + 1))p" "$TMPFIXED"
-            done | head -n "$TARGET" > "$OUTFILE"
-
+            head -n "$TARGET" "$TMPALIVE" > "$OUTFILE"
             local FINAL=$(wc -l < "$OUTFILE")
             echo "  Result: $FINAL alive configs saved"
-            rm -f "$TMPFIXED"
+            rm -f "$TMPFIXED" "$TMPALIVE"
             return 0
           }
 
-          # TCP connect проверка (быстрая альтернатива Xray Checker)
+          # TCP connect проверка (быстрая альтернатива)
           check_with_tcp() {
             local TMPRAW="$1"
             local TARGET="$2"
             local OUTFILE="$3"
 
-            # Фильтруем битые конфиги
             local TMPFIXED=$(mktemp)
-            grep -v 'security=false' "$TMPRAW" | grep -v 'security=none' | grep -vE '^\s*$' > "$TMPFIXED"
+            grep -vE 'security=(false|none)' "$TMPRAW" | grep -vE '^\s*$' > "$TMPFIXED"
             local FILTERED=$(wc -l < "$TMPFIXED")
             local REMOVED=$(($(wc -l < "$TMPRAW") - FILTERED))
             [ "$REMOVED" -gt 0 ] && echo "  Filtered out $REMOVED broken configs"
@@ -195,7 +321,6 @@ jobs:
 
             echo "  Checking $TOTAL configs with TCP connect (target=$TARGET)..."
 
-            # Извлекаем host:port из каждой строки и проверяем через nc
             local TMPALIVE=$(mktemp)
             local CHECKED=0
             local ALIVE=0
@@ -205,14 +330,12 @@ jobs:
               local HOST=""
               local PORT=""
 
-              # vmess:// — base64 JSON
               if echo "$LINE" | grep -q '^vmess://'; then
                 local B64=$(echo "$LINE" | sed 's|^vmess://||')
                 local JSON=$(echo "$B64" | base64 -d 2>/dev/null)
                 HOST=$(echo "$JSON" | jq -r '.add // empty')
                 PORT=$(echo "$JSON" | jq -r '.port // empty')
               else
-                # vless://, trojan://, ss://, hy2://, tuic:// — формат scheme://userinfo@host:port?params
                 HOST=$(echo "$LINE" | sed -E 's|^[a-z]+://[^@]*@([^:?#]+).*|\1|')
                 PORT=$(echo "$LINE" | sed -E 's|^[a-z]+://[^@]*@[^:?#]+:([0-9]+).*|\1|')
               fi
@@ -221,11 +344,9 @@ jobs:
                 continue
               fi
 
-              # Проверяем TCP connect с таймаутом 5 сек
               if nc -z -w5 "$HOST" "$PORT" 2>/dev/null; then
                 echo "$LINE" >> "$TMPALIVE"
                 ALIVE=$((ALIVE + 1))
-                # Достаточно живых — выходим рано
                 if [ "$ALIVE" -ge "$TARGET" ]; then
                   break
                 fi
@@ -252,14 +373,18 @@ jobs:
             local OUTFILE="configs/$FILENAME"
 
             # Определяем какой чекер использовать
-            local USE_XRAY
-            if [ -n "${INPUT_XRAY_CHECKER:-}" ] && [ "$INPUT_XRAY_CHECKER" != "" ]; then
-              USE_XRAY="$INPUT_XRAY_CHECKER"
+            local USE_SINGBOX
+            if [ -n "${INPUT_CHECKER:-}" ] && [ "$INPUT_CHECKER" != "" ]; then
+              if [ "$INPUT_CHECKER" = "sing-box" ]; then
+                USE_SINGBOX="true"
+              else
+                USE_SINGBOX="false"
+              fi
             else
-              USE_XRAY=$(jq -r "[.lists[] | select(.filename == \"$FILENAME\") | .xray_checker // true] | any" sources.json)
+              USE_SINGBOX="true"
             fi
 
-            echo "=== $FILENAME: target=$TARGET, checker=$([ "$USE_XRAY" = "true" ] && echo "xray" || echo "tcp") ==="
+            echo "=== $FILENAME: target=$TARGET, checker=$([ "$USE_SINGBOX" = "true" ] && echo "sing-box" || echo "tcp") ==="
 
             # Собираем сырые конфиги со всех источников в один файл
             local TMPRAW=$(mktemp)
@@ -306,8 +431,8 @@ jobs:
               return
             fi
 
-            if [ "$USE_XRAY" = "true" ]; then
-              if check_with_xray "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
+            if [ "$USE_SINGBOX" = "true" ]; then
+              if check_with_singbox "$TMPRAW" "$SUM_TARGET" "$OUTFILE"; then
                 rm -f "$TMPRAW"
                 return
               fi
@@ -318,7 +443,7 @@ jobs:
               fi
             fi
 
-            # Fallback: если Xray Checker не дал результатов — сохраняем старый файл
+            # Fallback: если чекер не дал результатов — сохраняем старый файл
             if [ -f "$OUTFILE" ] && [ -s "$OUTFILE" ]; then
               echo "  WARNING: no alive configs, keeping old file ($(wc -l < "$OUTFILE") configs)"
             else
@@ -332,7 +457,7 @@ jobs:
           INPUT_COUNT="${{ github.event.inputs.count }}"
           INPUT_FILENAME="${{ github.event.inputs.filename }}"
           INPUT_PROTOCOLS="${{ github.event.inputs.protocols }}"
-          INPUT_XRAY_CHECKER="${{ github.event.inputs.xray_checker }}"
+          INPUT_CHECKER="${{ github.event.inputs.checker }}"
 
           if [ -n "$INPUT_URL" ]; then
             # Ручной запуск с URL
@@ -350,11 +475,8 @@ jobs:
             curl -sL "$INPUT_URL" | grep -E "$GREP_PATTERN" > "$TMPRAW"
             mkdir -p configs
             OUTFILE="configs/$INPUT_FILENAME"
-            if [ "$INPUT_XRAY_CHECKER" = "true" ]; then
-              CHECKER_FN="check_with_xray"
-            else
-              CHECKER_FN="check_with_tcp"
-            fi
+            CHECKER_FN="check_with_singbox"
+            [ "$INPUT_CHECKER" = "tcp" ] && CHECKER_FN="check_with_tcp"
             if ! $CHECKER_FN "$TMPRAW" "$COUNT" "$OUTFILE"; then
               if [ -f "$OUTFILE" ] && [ -s "$OUTFILE" ]; then
                 echo "  WARNING: no alive configs, keeping old file"
